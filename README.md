@@ -2,8 +2,6 @@
 
 A forensic media analysis tool built for law enforcement investigations. 100% local. No data ever leaves the machine.
 
-Developed as a capstone project in partnership with the **Williamson County District Attorney's Office** (Georgetown, TX).
-
 ---
 
 ## What It Does
