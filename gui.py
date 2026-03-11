@@ -1,9 +1,7 @@
-# =============================================================================
 # gui.py
 # ResultsWindow: results table, blur/auth gate, thumbnails, CSV/PDF export,
 #                AI summary, LLaVA visual description and threat flagging.
 # MediaAnalyzerGUI: main window, analysis dispatch, logging.
-# =============================================================================
 
 import os
 import threading
@@ -22,15 +20,14 @@ from constants import (DEMO_PASSWORD, VID_EXTS,
                        IMAGE_PREVIEW_COLS, VIDEO_PREVIEW_COLS, SINGLE_VIDEO_COLS,
                        COLUMN_HELP)
 from models import ImageItem, VideoFrameResult, SingleVideoFrame
-from ai import YOLODetector, build_ai_summary, build_llava_narrative, analyze_image_llava
+from ai import build_ai_summary, build_llava_narrative, analyze_image_llava
 from analysis import (build_image_items, assign_image_buckets, write_image_csv,
-                      analyze_single_image, VideoAnalyzer, SingleVideoAnalyzer)
+                      analyze_single_image, VideoAnalyzer, SingleVideoAnalyzer,
+                      HASH_METHODS)
 from pdf_report import generate_pdf_report
 
 
-# =============================================================================
 # RESULTS WINDOW
-# =============================================================================
 
 class ResultsWindow:
     """Sortable, filterable results table with blur/auth, CSV/PDF export, and AI summary."""
@@ -39,13 +36,17 @@ class ResultsWindow:
                  image_items: Optional[List[ImageItem]] = None,
                  video_results: Optional[List[VideoFrameResult]] = None,
                  single_video: Optional[SingleVideoAnalyzer] = None,
-                 video_paths: Optional[list] = None):
+                 video_paths: Optional[list] = None,
+                 initial_threshold: int = 6,
+                 hash_type: str = "phash"):
         self.parent        = parent
         self.mode          = mode
         self.image_items   = image_items   or []
         self.video_results = video_results or []
         self.single_video  = single_video
         self._video_paths  = video_paths   or []
+        self._initial_threshold = initial_threshold
+        self._hash_type         = hash_type
         self._sort_col: Optional[str] = None
         self._sort_reverse = False
         self._authorized   = False
@@ -66,11 +67,9 @@ class ResultsWindow:
     # -- Thumbnail preloading -------------------------------------------------
 
     def _preload_thumbnails(self):
-        """Build blurred and real thumbnails with a dominant color strip at the bottom."""
-        THUMB_W    = 64
-        THUMB_H    = 64
-        STRIP_H    = 16
-        TOTAL_H    = THUMB_H + STRIP_H
+        """Build blurred and clear 64x64 thumbnails for each image."""
+        THUMB_W    = 52
+        THUMB_H    = 52
         THUMB_SIZE = (THUMB_W, THUMB_H)
 
         for item in self.image_items:
@@ -79,39 +78,19 @@ class ResultsWindow:
                     im = im.convert("RGB")
                     im.thumbnail(THUMB_SIZE, Image.LANCZOS)
 
-                    padded = Image.new("RGB", (THUMB_W, TOTAL_H), (20, 20, 20))
+                    # Center on a dark background
+                    padded = Image.new("RGB", (THUMB_W, THUMB_H), (20, 20, 20))
                     offset = ((THUMB_W - im.width) // 2,
                               (THUMB_H - im.height) // 2)
                     padded.paste(im, offset)
 
-                    # Color swatch strip, three equal-width rectangles
-                    swatch_colors = [item.dominant_color_1,
-                                     item.dominant_color_2,
-                                     item.dominant_color_3]
-                    swatch_w = THUMB_W // 3
-                    for idx, hex_color in enumerate(swatch_colors):
-                        try:
-                            clean = hex_color.lstrip("#")
-                            rgb = (int(clean[0:2], 16),
-                                   int(clean[2:4], 16),
-                                   int(clean[4:6], 16))
-                        except Exception:
-                            rgb = (40, 40, 40)
-                        x0 = idx * swatch_w
-                        x1 = x0 + swatch_w if idx < 2 else THUMB_W
-                        for y in range(THUMB_H, TOTAL_H):
-                            for x in range(x0, x1):
-                                padded.putpixel((x, y), rgb)
-
-                    # Blurred version, only blur the photo portion
-                    blurred    = padded.copy()
-                    photo_part = blurred.crop((0, 0, THUMB_W, THUMB_H))
+                    # Blurred version
+                    blurred = padded.copy()
                     for _ in range(8):
-                        photo_part = photo_part.filter(
+                        blurred = blurred.filter(
                             ImageFilter.GaussianBlur(radius=6))
-                    blurred_arr = np.array(photo_part, dtype=np.float32) * 0.6
-                    photo_part  = Image.fromarray(blurred_arr.astype(np.uint8))
-                    blurred.paste(photo_part, (0, 0))
+                    blurred_arr = np.array(blurred, dtype=np.float32) * 0.6
+                    blurred = Image.fromarray(blurred_arr.astype(np.uint8))
 
                     self._thumb_cache[item.filename] = (
                         ImageTk.PhotoImage(blurred),
@@ -134,7 +113,7 @@ class ResultsWindow:
             self._auth_frame.pack(fill="x", padx=10, pady=(0, 4))
             self._lock_icon_lbl = tk.Label(
                 self._auth_frame,
-                text="RESTRICTED: Image content is blurred. Authorized personnel only.",
+                text="RESTRICTED -- Image content is blurred. Authorized personnel only.",
                 bg="#8B1A1A", fg="white", font=("", 9, "bold"), anchor="w"
             )
             self._lock_icon_lbl.pack(side="left", padx=8)
@@ -162,30 +141,59 @@ class ResultsWindow:
         self.filter_var = tk.StringVar()
         self.filter_var.trace_add("write", lambda *_: self._apply_filter())
         tk.Entry(filter_frame, textvariable=self.filter_var, width=26).pack(side="left", padx=6)
-        tk.Label(filter_frame, text="  Object keyword:").pack(side="left")
-        self.obj_filter_var = tk.StringVar()
-        self.obj_filter_var.trace_add("write", lambda *_: self._apply_filter())
-        tk.Entry(filter_frame, textvariable=self.obj_filter_var, width=18).pack(side="left", padx=6)
         if self.mode in ("Image", "Single Image"):
             self.similar_only_var = tk.BooleanVar(value=False)
             tk.Checkbutton(filter_frame, text="Similar groups only",
                            variable=self.similar_only_var,
                            command=self._apply_filter).pack(side="left", padx=8)
 
+            # Live hash threshold slider
+            method_label = next(k for k, v in HASH_METHODS.items()
+                                if v == self._hash_type)
+            tk.Label(filter_frame,
+                     text=f"  {method_label} threshold:",
+                     font=("Arial", 9)).pack(side="left")
+            self.threshold_live_var = tk.IntVar(value=self._initial_threshold)
+            self.threshold_live_lbl = tk.Label(filter_frame, text=str(self._initial_threshold),
+                                                font=("Arial", 9, "bold"),
+                                                fg="#1A4F8A", width=2)
+            self.threshold_live_lbl.pack(side="left")
+            tk.Scale(filter_frame, from_=0, to=20,
+                     variable=self.threshold_live_var,
+                     orient="horizontal", length=120,
+                     showvalue=False, width=10,
+                     command=self._on_threshold_change).pack(side="left", padx=(2, 8))
+
+            # View Groups button
+            tk.Button(filter_frame, text="View Groups",
+                      command=self._open_group_viewer,
+                      bg="#0D2B4E", fg="white",
+                      font=("Arial", 9, "bold"),
+                      relief="flat", padx=10, cursor="hand2").pack(side="left", padx=(4, 0))
+
         # Button bar (packed before treeview so it anchors to the bottom)
         btn_frame = tk.Frame(self.win)
         btn_frame.pack(fill="x", padx=10, pady=(4, 2), side="bottom")
         tk.Button(btn_frame, text="Export CSV", command=self._export_csv,
-                  bg="#2d6a2d", fg="white", font=("", 10, "bold"), padx=8).pack(side="left")
+                  bg="#2d6a2d", fg="white", font=("Arial", 10, "bold"),
+                  relief="flat", padx=8, cursor="hand2").pack(side="left")
         tk.Button(btn_frame, text="Export PDF Report", command=self._export_pdf,
-                  bg="#1a4f8a", fg="white", font=("", 10, "bold"), padx=8).pack(side="left", padx=6)
+                  bg="#1a4f8a", fg="white", font=("Arial", 10, "bold"),
+                  relief="flat", padx=8, cursor="hand2").pack(side="left", padx=6)
         tk.Button(btn_frame, text="Close", command=self.win.destroy,
-                  padx=8).pack(side="left", padx=4)
+                  font=("Arial", 9), relief="flat", padx=8).pack(side="left", padx=4)
         self.export_status = tk.Label(btn_frame, text="", fg="green")
         self.export_status.pack(side="left")
+        if self.mode in ("Image", "Single Image"):
+            self.groups_only_var = tk.BooleanVar(value=False)
+            tk.Checkbutton(btn_frame, text="Export grouped images only",
+                           variable=self.groups_only_var,
+                           font=("Arial", 9)).pack(side="left", padx=(12, 0))
+        else:
+            self.groups_only_var = tk.BooleanVar(value=False)
         tk.Label(btn_frame,
-                 text="  Yellow = pHash group   Green = AI detection   Double-click image to preview",
-                 font=("", 8), fg="#666").pack(side="right", padx=10)
+                 text="  Yellow = pHash similarity group   Red = LLaVA flag   Double-click image to preview",
+                 font=("Arial", 8), fg="#666").pack(side="right", padx=10)
 
         # AI Analysis panel
         ai_frame = tk.LabelFrame(self.win,
@@ -200,8 +208,8 @@ class ResultsWindow:
             desc_row = tk.Frame(ai_frame, bg="#EEF3FA")
             desc_row.pack(fill="x", pady=(0, 6))
             tk.Label(desc_row,
-                     text="Forensic Summary: interprets the analysis metrics in plain English using Llama 3.   "
-                          "Visual Analysis: describes what is seen in the image and flags weapons, drugs, or contraband using LLaVA.",
+                     text="Forensic Summary interprets the analysis metrics in plain English using Llama 3, while "
+                          "Visual Analysis describes what is seen in the image and flags weapons, drugs, or contraband using LLaVA.",
                      font=("Arial", 8), fg="#444", bg="#EEF3FA",
                      anchor="w", wraplength=900, justify="left",
                      pady=4, padx=6).pack(fill="x")
@@ -238,8 +246,8 @@ class ResultsWindow:
             desc_row = tk.Frame(ai_frame, bg="#EEF3FA")
             desc_row.pack(fill="x", pady=(0, 6))
             tk.Label(desc_row,
-                     text="  Forensic Summary: interprets the analysis metrics in plain English using Llama 3.   "
-                          "Visual Description: sends sampled frames to LLaVA to describe what is seen, "
+                     text="Forensic Summary interprets the analysis metrics in plain English using Llama 3, while "
+                          "Visual Description sends sampled frames to LLaVA to describe what is seen, "
                           "then Llama 3 synthesizes the descriptions into a chronological narrative.",
                      font=("Arial", 8), fg="#444", bg="#EEF3FA",
                      anchor="w", wraplength=900, justify="left",
@@ -278,7 +286,7 @@ class ResultsWindow:
                                        state="disabled")
         self.ai_summary_text.pack(fill="x", pady=(8, 0))
 
-        # Treeview -- packed last so expand fills the remaining space
+        # Packed last so expand fills the remaining space
         tree_frame = tk.Frame(self.win)
         tree_frame.pack(fill="both", expand=True, padx=10, pady=4)
 
@@ -287,9 +295,21 @@ class ResultsWindow:
                    else VIDEO_PREVIEW_COLS)
         col_ids = [c[0] for c in cols]
         self.tree = ttk.Treeview(tree_frame, columns=col_ids,
-                                 show="headings", selectmode="browse")
+                                 show="tree headings", selectmode="browse")
+        # Column #0 is the tree icon column...use it for thumbnails in image modes
+        if self.mode in ("Image", "Single Image"):
+            self.tree.heading("#0", text="Preview")
+            self.tree.column("#0", width=58, anchor="center", stretch=False)
+        else:
+            self.tree.column("#0", width=0, minwidth=0, stretch=False)
+
+        method_display = next(
+            (k for k, v in HASH_METHODS.items() if v == self._hash_type),
+            "pHash"
+        )
         for col_id, col_label, col_width in cols:
-            self.tree.heading(col_id, text=col_label,
+            label = f"{method_display} Value" if col_id == "hash_value" else col_label
+            self.tree.heading(col_id, text=label,
                               command=lambda c=col_id: self._sort_by(c))
             self.tree.column(col_id, width=col_width, anchor="w", stretch=False)
 
@@ -312,10 +332,168 @@ class ResultsWindow:
         self.tree.tag_configure("odd",       background="#f5f5f5")
         self.tree.tag_configure("even",      background="#ffffff")
         self.tree.tag_configure("highlight", background="#fff3cd")
-        self.tree.tag_configure("detected",  background="#d4edda")
         self.tree.tag_configure("flagged",   background="#FFCCCC")
 
-    # -- Cell click handler (Maps Link) --------------------------------------
+    # Live threshold re-bucketing
+
+    def _on_threshold_change(self, val):
+        """Re-run pHash bucketing live when the threshold slider moves."""
+        threshold = int(float(val))
+        self.threshold_live_lbl.config(text=str(threshold))
+        if not self.image_items:
+            return
+        # Re-run Union-Find bucketing with the new threshold and hash type
+        assign_image_buckets(self.image_items, threshold=threshold,
+                             hash_type=self._hash_type)
+        self._apply_filter()
+
+    # Group viewer
+
+    def _open_group_viewer(self):
+        """Open a popup showing all pHash similarity groups side by side."""
+        if not self.image_items:
+            return
+
+        # Build groups dict: bucket_id -> [ImageItem, ...]
+        groups = defaultdict(list)
+        for item in self.image_items:
+            if item.bucket_phash != -1:
+                groups[item.bucket_phash].append(item)
+        # Only keep groups with 2+ members
+        groups = {k: v for k, v in groups.items() if len(v) > 1}
+
+        if not groups:
+            tk.messagebox.showinfo(
+                "No Groups",
+                "No similarity groups found at the current threshold. "
+                "Try increasing the pHash threshold slider.",
+                parent=self.win
+            )
+            return
+
+        popup = tk.Toplevel(self.win)
+        popup.title(f"Similarity Groups  ({len(groups)} group(s))")
+        popup.geometry("1100x680")
+        popup.grab_set()
+
+        # Header
+        header = tk.Frame(popup, bg="#0D2B4E")
+        header.pack(fill="x")
+        tk.Label(header, text="Similarity Groups",
+                 bg="#0D2B4E", fg="white",
+                 font=("Arial", 13, "bold"),
+                 pady=10, padx=16, anchor="w").pack(side="left")
+        tk.Label(header,
+                 text=f"{len(groups)} group(s)  |  "
+                      f"{sum(len(v) for v in groups.values())} image(s) total  |  "
+                      f"Largest group: {max(len(v) for v in groups.values())} images",
+                 bg="#0D2B4E", fg="#AACCEE",
+                 font=("Arial", 9), padx=16).pack(side="right")
+        tk.Frame(popup, bg="#1A4F8A", height=2).pack(fill="x")
+
+        # Scrollable canvas
+        canvas_frame = tk.Frame(popup)
+        canvas_frame.pack(fill="both", expand=True, padx=10, pady=8)
+        canvas = tk.Canvas(canvas_frame, bg="#F5F7FA")
+        vsb = tk.Scrollbar(canvas_frame, orient="vertical", command=canvas.yview)
+        vsb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        canvas.configure(yscrollcommand=vsb.set)
+
+        inner = tk.Frame(canvas, bg="#F5F7FA")
+        canvas_window = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_resize(event):
+            canvas.itemconfig(canvas_window, width=event.width)
+        canvas.bind("<Configure>", _on_resize)
+        inner.bind("<Configure>", lambda e: canvas.configure(
+            scrollregion=canvas.bbox("all")))
+
+        THUMB = 110
+        photo_refs = []  # prevent GC
+
+        for group_idx, (bucket_id, items) in enumerate(
+                sorted(groups.items(), key=lambda x: -len(x[1]))):
+            # Group header row
+            grp_header = tk.Frame(inner, bg="#DDE6F5")
+            grp_header.pack(fill="x", pady=(10 if group_idx > 0 else 2, 4), padx=4)
+            tk.Label(grp_header,
+                     text=f"  Group {bucket_id}  —  {len(items)} images",
+                     bg="#DDE6F5", fg="#0D2B4E",
+                     font=("Arial", 10, "bold"),
+                     pady=4).pack(side="left")
+
+            # Mean hash distance if available
+            dvals = [i.hash_dist for i in items if i.hash_dist > 0]
+            if dvals:
+                avg_d = round(sum(dvals) / len(dvals), 2)
+                tk.Label(grp_header,
+                         text=f"  Avg hash distance: {avg_d}",
+                         bg="#DDE6F5", fg="#555",
+                         font=("Arial", 9)).pack(side="left", padx=8)
+
+            # Thumbnails row
+            thumb_row = tk.Frame(inner, bg="#F5F7FA")
+            thumb_row.pack(fill="x", padx=8, pady=(0, 4))
+
+            for item in items:
+                cell = tk.Frame(thumb_row, bg="#F5F7FA", padx=4, pady=4)
+                cell.pack(side="left")
+
+                # Get or generate thumbnail
+                thumb_img = None
+                if item.filename in self._thumb_cache:
+                    blurred, real = self._thumb_cache[item.filename]
+                    thumb_img = real if self._authorized else blurred
+                else:
+                    try:
+                        with Image.open(item.path) as im:
+                            im = im.convert("RGB")
+                            im.thumbnail((THUMB, THUMB), Image.LANCZOS)
+                            padded = Image.new("RGB", (THUMB, THUMB), (240, 243, 248))
+                            padded.paste(im, ((THUMB - im.width) // 2,
+                                             (THUMB - im.height) // 2))
+                            if not self._authorized:
+                                for _ in range(8):
+                                    padded = padded.filter(
+                                        ImageFilter.GaussianBlur(radius=6))
+                            thumb_img = ImageTk.PhotoImage(padded)
+                            photo_refs.append(thumb_img)
+                    except Exception:
+                        thumb_img = None
+
+                if thumb_img:
+                    img_lbl = tk.Label(cell, image=thumb_img, bg="#F5F7FA",
+                                       cursor="hand2")
+                    img_lbl.image = thumb_img
+                    img_lbl.pack()
+                    # Double-click to preview full image
+                    img_lbl.bind("<Double-1>",
+                        lambda e, fn=item.filename: self._preview_image_by_name(fn))
+
+                # Filename label under thumbnail
+                short = item.filename if len(item.filename) <= 14 else item.filename[:12] + "…"
+                tk.Label(cell, text=short, bg="#F5F7FA",
+                         font=("Arial", 7), fg="#444",
+                         wraplength=THUMB).pack()
+
+        tk.Button(popup, text="Close", command=popup.destroy,
+                  bg="#1A4F8A", fg="white",
+                  font=("Arial", 9, "bold"),
+                  relief="flat", padx=14, pady=4,
+                  cursor="hand2").pack(pady=(4, 10))
+
+        # Store refs to prevent GC
+        popup._photo_refs = photo_refs
+
+    def _preview_image_by_name(self, filename: str):
+        """Find an image item by filename and open its preview popup."""
+        for item in self.image_items:
+            if item.filename == filename:
+                self._show_image_preview(item.filename)
+                return
+
+    # Cell click handler (Maps Link)
 
     def _on_cell_click(self, event):
         """If the user clicks on a Maps Link cell, open it in the browser."""
@@ -345,7 +523,7 @@ class ResultsWindow:
             import webbrowser
             webbrowser.open(url)
 
-    # -- Column help (right-click header) ------------------------------------
+    # Column help (right-click header)
 
     def _on_header_right_click(self, event):
         """Detect right-click on a column header and show a help context menu."""
@@ -409,7 +587,7 @@ class ResultsWindow:
         y = self.win.winfo_y() + (self.win.winfo_height() - popup.winfo_height()) // 2
         popup.geometry(f"+{x}+{y}")
 
-    # -- Data helpers ---------------------------------------------------------
+    # Data helpers 
 
     def _all_rows(self) -> List[dict]:
         if self.mode in ("Image", "Single Image"):
@@ -424,7 +602,7 @@ class ResultsWindow:
             counts[r.get("bucket_phash", -1)] += 1
         return counts
 
-    # -- Table population -----------------------------------------------------
+    # Table population
 
     def _populate(self, rows: Optional[List[dict]] = None):
         self.tree.delete(*self.tree.get_children())
@@ -438,12 +616,16 @@ class ResultsWindow:
         col_ids = [c[0] for c in cols]
 
         for i, row in enumerate(rows):
-            values = ["" if c == "_thumb" else row.get(c, "") for c in col_ids]
+            values = []
+            for c in col_ids:
+                if c == "hash_value" and self.mode in ("Image", "Single Image"):
+                    values.append(row.get(self._hash_type, ""))
+                else:
+                    values.append(row.get(c, ""))
             tag = "odd" if i % 2 else "even"
-            if row.get("detected_objects", "").strip():
-                tag = "detected"
             if self.mode in ("Image", "Single Image"):
-                if bucket_counts.get(row.get("bucket_phash", -1), 0) > 1:
+                bid = row.get("bucket_phash", -1)
+                if bid != -1 and bucket_counts.get(bid, 0) > 1:
                     tag = "highlight"
 
             iid = self.tree.insert("", "end", values=values, tags=(tag,))
@@ -457,36 +639,34 @@ class ResultsWindow:
 
         style = ttk.Style()
         style.configure("Treeview",
-                        rowheight=82 if self.mode in ("Image", "Single Image") else 22)
+                        rowheight=56 if self.mode in ("Image", "Single Image") else 22)
         self._update_summary(rows)
 
     def _update_summary(self, rows: List[dict]):
         if self.mode in ("Image", "Single Image"):
-            total = len(rows)
-            bc    = defaultdict(int)
+            total     = len(rows)
+            # -1 means unique (no match); any other value is a group bucket
+            unique    = sum(1 for r in rows if r.get("bucket_phash", -1) == -1)
+            bc        = defaultdict(int)
             for r in rows:
-                bc[r.get("bucket_phash", -1)] += 1
-            groups    = sum(1 for v in bc.values() if v > 1)
-            in_groups = sum(v for v in bc.values() if v > 1)
-            dbscan_g  = len({r.get("bucket_dbscan", -1) for r in rows
-                              if r.get("bucket_dbscan", -1) != -1})
-            with_det  = sum(1 for r in rows if r.get("detected_objects", "").strip())
-            bvals     = [r["avg_brightness"] for r in rows if "avg_brightness" in r]
-            avg_b     = round(sum(bvals) / len(bvals), 1) if bvals else 0
+                bid = r.get("bucket_phash", -1)
+                if bid != -1:
+                    bc[bid] += 1
+            groups    = len(bc)
+            in_groups = sum(bc.values())
+            largest   = max(bc.values(), default=0)
+            largest_str = f"   |   Largest group: {largest}" if largest > 0 else ""
             self.summary_var.set(
-                f"{total} image(s)   |   {groups} pHash group(s)   |   "
-                f"{dbscan_g} DBSCAN cluster(s)   |   "
-                f"{in_groups} in groups   |   {with_det} with AI detections   |   "
-                f"Avg brightness: {avg_b} / 255"
+                f"{total} image(s)   |   {unique} unique   |   "
+                f"{groups} similarity group(s)   |   {in_groups} in groups"
+                f"{largest_str}"
             )
         elif self.mode == "Single Video":
-            total    = len(rows)
-            with_det = sum(1 for r in rows if r.get("detected_objects", "").strip())
-            motions  = [r["motion_score"] for r in rows if "motion_score" in r]
-            avg_m    = round(sum(motions) / len(motions), 2) if motions else 0
+            total   = len(rows)
+            motions = [r["motion_score"] for r in rows if "motion_score" in r]
+            avg_m   = round(sum(motions) / len(motions), 2) if motions else 0
             self.summary_var.set(
-                f"{total} frame(s) sampled   |   Avg motion score: {avg_m}   |   "
-                f"{with_det} frame(s) with AI detections"
+                f"{total} frame(s) sampled   |   Avg motion score: {avg_m}"
             )
         else:
             total = len(rows)
@@ -494,31 +674,25 @@ class ResultsWindow:
                 sims     = [r.get("similarity_ssim", 0) for r in rows]
                 msev     = [r.get("similarity_mse",  0) for r in rows]
                 psnv     = [r.get("similarity_psnr", 0) for r in rows]
-                with_det = sum(1 for r in rows if r.get("detected_objects", "").strip())
                 self.summary_var.set(
                     f"{total} frame comparison(s)   |   "
                     f"Avg SSIM: {round(sum(sims)/len(sims),1)}%   |   "
                     f"Avg MSE: {round(sum(msev)/len(msev),1)}   |   "
-                    f"Avg PSNR: {round(sum(psnv)/len(psnv),1)} dB   |   "
-                    f"{with_det} frame(s) with AI detections"
+                    f"Avg PSNR: {round(sum(psnv)/len(psnv),1)} dB"
                 )
             else:
                 self.summary_var.set("No results.")
 
-    # -- Filtering and sorting ------------------------------------------------
+    # Filtering and sorting
 
     def _apply_filter(self):
         query     = self.filter_var.get().strip().lower()
-        obj_query = self.obj_filter_var.get().strip().lower()
         rows      = self._all_rows()
         if query:
             rows = [r for r in rows
                     if query in str(r.get("filename",     "")).lower()
                     or query in str(r.get("video_pair_1", "")).lower()
                     or query in str(r.get("video_pair_2", "")).lower()]
-        if obj_query:
-            rows = [r for r in rows
-                    if obj_query in str(r.get("detected_objects", "")).lower()]
         if (self.mode in ("Image", "Single Image")
                 and hasattr(self, "similar_only_var")
                 and self.similar_only_var.get()):
@@ -530,20 +704,25 @@ class ResultsWindow:
         self._sort_reverse = (self._sort_col == col) and not self._sort_reverse
         self._sort_col     = col
         rows               = self._all_rows()
+        sort_field = self._hash_type if col == "hash_value" else col
         try:
-            rows.sort(key=lambda r: (r.get(col) is None, r.get(col, "")),
+            rows.sort(key=lambda r: (r.get(sort_field) is None, r.get(sort_field, "")),
                       reverse=self._sort_reverse)
         except TypeError:
-            rows.sort(key=lambda r: str(r.get(col, "")), reverse=self._sort_reverse)
+            rows.sort(key=lambda r: str(r.get(sort_field, "")), reverse=self._sort_reverse)
         self._populate(rows)
         cols = (IMAGE_PREVIEW_COLS if self.mode in ("Image", "Single Image")
                 else SINGLE_VIDEO_COLS if self.mode == "Single Video"
                 else VIDEO_PREVIEW_COLS)
+        method_display = next(
+            (k for k, v in HASH_METHODS.items() if v == self._hash_type), "pHash"
+        )
         for col_id, col_label, _ in cols:
+            label = f"{method_display} Value" if col_id == "hash_value" else col_label
             arrow = (" ^" if not self._sort_reverse else " v") if col_id == col else ""
-            self.tree.heading(col_id, text=col_label + arrow)
+            self.tree.heading(col_id, text=label + arrow)
 
-    # -- CSV export -----------------------------------------------------------
+    # CSV export 
 
     def _export_csv(self):
         path = filedialog.asksaveasfilename(
@@ -554,7 +733,15 @@ class ResultsWindow:
             return
         try:
             if self.mode in ("Image", "Single Image"):
-                write_image_csv(self.image_items, path)
+                items = self.image_items
+                if self.groups_only_var.get():
+                    items = [it for it in items if it.bucket_phash != -1]
+                    if not items:
+                        messagebox.showinfo("No Groups",
+                            "No similarity groups found at the current threshold. "
+                            "Export cancelled.", parent=self.win)
+                        return
+                write_image_csv(items, path)
             elif self.mode == "Single Video" and self.single_video:
                 self.single_video.write_csv(path)
             else:
@@ -565,7 +752,7 @@ class ResultsWindow:
         except Exception as e:
             messagebox.showerror("Export Error", str(e), parent=self.win)
 
-    # -- PDF export -----------------------------------------------------------
+    # PDF export 
 
     def _export_pdf(self):
         path = filedialog.asksaveasfilename(
@@ -574,16 +761,26 @@ class ResultsWindow:
         )
         if not path:
             return
+        items = self.image_items or None
+        groups_only = self.groups_only_var.get()
+        if groups_only and self.mode in ("Image", "Single Image") and items:
+            items = [it for it in items if it.bucket_phash != -1]
+            if not items:
+                messagebox.showinfo("No Groups",
+                    "No similarity groups found at the current threshold. "
+                    "Export cancelled.", parent=self.win)
+                return
         self.export_status.config(text="Generating PDF...", fg="#555")
         self.win.update_idletasks()
         try:
             generate_pdf_report(
                 out_path=path,
                 mode=self.mode,
-                image_items=self.image_items or None,
+                image_items=items,
                 video_results=self.video_results or None,
                 single_video=self.single_video,
                 ai_summary=self._ai_summary_text_cache,
+                groups_only=groups_only,
             )
             self.export_status.config(
                 text=f"PDF saved: {os.path.basename(path)}", fg="green"
@@ -592,7 +789,7 @@ class ResultsWindow:
             messagebox.showerror("PDF Export Error", str(e), parent=self.win)
             self.export_status.config(text="PDF export failed.", fg="red")
 
-    # -- AI summary -----------------------------------------------------------
+    # AI summary 
 
     def _generate_summary(self):
         self.ai_summary_btn.config(state="disabled")
@@ -612,8 +809,6 @@ class ResultsWindow:
                 similarity_mse=0,
                 similarity_psnr=0,
                 motion_score=f.motion_score,
-                detected_objects=f.detected_objects,
-                detection_confidence=f.detection_confidence,
             ) for f in self.single_video.frames]
 
         def _run():
@@ -646,7 +841,7 @@ class ResultsWindow:
         self.ai_status_label.config(text="  Failed -- see message above.", fg="red")
         self.ai_summary_btn.config(state="normal")
 
-    # -- LLaVA visual description (video modes) -------------------------------
+    # LLaVA visual description (video modes)
 
     def _generate_visual_description(self):
         """
@@ -779,11 +974,11 @@ class ResultsWindow:
         self.ai_summary_text.insert(tk.END, f"Error: {error}")
         self.ai_summary_text.configure(state="disabled")
         self.ai_status_label.config(
-            text="  Visual description failed. See message above.", fg="red"
+            text="  Visual description failed -- see message above.", fg="red"
         )
         self.llava_btn.config(state="normal")
 
-    # -- LLaVA image analysis (image modes) -----------------------------------
+    # LLaVA image analysis (image modes)
 
     def _analyze_image_with_llava(self):
         """
@@ -875,7 +1070,7 @@ class ResultsWindow:
 
         if flagged:
             self.ai_status_label.config(
-                text="  FLAGGED -- potential item of investigative concern detected.",
+                text="  FLAGGED: Potential item of investigative concern detected.",
                 fg="red"
             )
             # Highlight the flagged row in the treeview
@@ -913,11 +1108,11 @@ class ResultsWindow:
         self.ai_summary_text.insert(tk.END, f"Error: {error}")
         self.ai_summary_text.configure(state="disabled")
         self.ai_status_label.config(
-            text="  LLaVA analysis failed. See message above.", fg="red"
+            text="  LLaVA analysis failed -- see message above.", fg="red"
         )
         self.llava_img_btn.config(state="normal")
 
-    # -- Auth and image preview -----------------------------------------------
+    # Auth and image preview 
 
     def _authorize(self):
         pwd = simpledialog.askstring(
@@ -931,7 +1126,7 @@ class ResultsWindow:
             self._authorized = True
             self._auth_frame.config(bg="#1D6A3A")
             self._lock_icon_lbl.config(
-                text="AUTHORIZED: Image content unlocked. Viewing full resolution previews.",
+                text="AUTHORIZED -- Image content unlocked. Viewing full resolution previews.",
                 bg="#1D6A3A"
             )
             self._auth_btn.config(text="Authorized", state="disabled", bg="#145228")
@@ -990,9 +1185,7 @@ class ResultsWindow:
             tk.Label(popup, text=f"Could not load image:\n{e}", fg="red").pack(pady=20)
 
 
-# =============================================================================
 # MAIN GUI
-# =============================================================================
 
 class MediaAnalyzerGUI:
     def __init__(self):
@@ -1023,6 +1216,7 @@ class MediaAnalyzerGUI:
     def _build_ui(self):
         root = self.root
 
+        # Apply clam theme for a cleaner modern look
         style = ttk.Style()
         style.theme_use("clam")
         style.configure("TProgressbar", troughcolor="#dde3ec", background="#1A4F8A",
@@ -1045,7 +1239,7 @@ class MediaAnalyzerGUI:
                  font=("Arial", 16, "bold"),
                  pady=10, padx=16, anchor="w").pack(side="left")
         tk.Label(banner,
-                 text="Forensic Image and Video Analysis  |  Williamson County DA",
+                 text="Forensic Image and Video Analysis",
                  bg="#0D2B4E", fg="#AACCEE",
                  font=("Arial", 9),
                  padx=16, anchor="e").pack(side="right")
@@ -1087,7 +1281,7 @@ class MediaAnalyzerGUI:
                                    font=("Arial", 8), fg="#888")
         self.input_hint.pack(side="left", padx=6)
 
-        # Row 2: Options + YOLO
+        # Row 2: Analysis options
         row2 = tk.Frame(content)
         row2.pack(fill="x", pady=(0, 8))
 
@@ -1098,30 +1292,16 @@ class MediaAnalyzerGUI:
         self.interval_var = tk.StringVar(value="0.5")
         tk.Entry(opts_frame, textvariable=self.interval_var,
                  width=5, font=("Arial", 9)).pack(side="left", padx=(4, 10))
-        tk.Label(opts_frame, text="pHash threshold:", font=("Arial", 9)).pack(side="left")
+        tk.Label(opts_frame, text="Hash method:", font=("Arial", 9)).pack(side="left", padx=(10, 0))
+        self.hash_method_var = tk.StringVar(value="pHash")
+        ttk.Combobox(opts_frame, textvariable=self.hash_method_var,
+                     values=list(HASH_METHODS.keys()),
+                     state="readonly", width=16,
+                     font=("Arial", 9)).pack(side="left", padx=(4, 10))
+        tk.Label(opts_frame, text="Threshold:", font=("Arial", 9)).pack(side="left")
         self.threshold_var = tk.StringVar(value="6")
         tk.Entry(opts_frame, textvariable=self.threshold_var,
                  width=4, font=("Arial", 9)).pack(side="left", padx=4)
-
-        ai_frame = tk.LabelFrame(row2, text="AI Object Detection (YOLO)", padx=8, pady=6,
-                                 font=("Arial", 9, "bold"), fg="#0D2B4E")
-        ai_frame.pack(side="left", padx=(0, 10))
-        self.ai_enabled_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(ai_frame, text="Enable", variable=self.ai_enabled_var,
-                       command=self._toggle_ai_options,
-                       font=("Arial", 9)).pack(side="left", padx=(0, 8))
-        tk.Label(ai_frame, text="Model:", font=("Arial", 9)).pack(side="left")
-        self.model_var  = tk.StringVar(value="Nano  (fastest, less accurate)")
-        self.model_menu = ttk.Combobox(ai_frame, textvariable=self.model_var,
-                                       values=list(YOLODetector.MODEL_OPTIONS.keys()),
-                                       state="disabled", width=26,
-                                       font=("Arial", 9))
-        self.model_menu.pack(side="left", padx=4)
-        tk.Label(ai_frame, text="  Min conf:", font=("Arial", 9)).pack(side="left")
-        self.conf_var   = tk.StringVar(value="0.35")
-        self.conf_entry = tk.Entry(ai_frame, textvariable=self.conf_var,
-                                   width=5, state="disabled", font=("Arial", 9))
-        self.conf_entry.pack(side="left", padx=4)
 
         # Run button
         self.run_btn = tk.Button(root, text="Run Analysis",
@@ -1166,11 +1346,6 @@ class MediaAnalyzerGUI:
             text="file" if mode in ("Single Image", "Single Video") else "folder"
         )
 
-    def _toggle_ai_options(self):
-        state = "normal" if self.ai_enabled_var.get() else "disabled"
-        self.model_menu.config(state="readonly" if state == "normal" else "disabled")
-        self.conf_entry.config(state=state)
-
     def _browse_input(self):
         mode = self.mode_var.get()
         if mode == "Single Image":
@@ -1190,7 +1365,7 @@ class MediaAnalyzerGUI:
         if path:
             self.input_var.set(path)
 
-    # -- Logging --------------------------------------------------------------
+    # Logging
 
     def _poll_log_queue(self):
         try:
@@ -1214,14 +1389,7 @@ class MediaAnalyzerGUI:
             self.progress_label.config(text=f"{label}  ({current}/{total})")
         ))
 
-    # -- Analysis dispatch ----------------------------------------------------
-
-    def _build_detector(self) -> Optional[YOLODetector]:
-        if not self.ai_enabled_var.get():
-            return None
-        model_key  = self.model_var.get()
-        model_file = YOLODetector.MODEL_OPTIONS.get(model_key, "yolov8n.pt")
-        return YOLODetector(model_size=model_file)
+    # Analysis dispatch
 
     def _start_analysis(self):
         path = self.input_var.get().strip()
@@ -1236,19 +1404,14 @@ class MediaAnalyzerGUI:
     def _run_analysis(self, path: str):
         mode = self.mode_var.get()
         try:
-            detector = self._build_detector()
-            if detector:
-                self.log(f"AI detection enabled -- loading {detector.model_size}...")
-                detector._load()
-                self.log("   Model loaded and ready.")
             if mode == "Image":
-                self._run_image_analysis(path, detector)
+                self._run_image_analysis(path)
             elif mode == "Single Image":
-                self._run_single_image_analysis(path, detector)
+                self._run_single_image_analysis(path)
             elif mode == "Video":
-                self._run_video_analysis(path, detector)
+                self._run_video_analysis(path)
             elif mode == "Single Video":
-                self._run_single_video_analysis(path, detector)
+                self._run_single_video_analysis(path)
         except RuntimeError as e:
             self.log(f"Error: {e}")
         except Exception as e:
@@ -1257,59 +1420,54 @@ class MediaAnalyzerGUI:
             self.root.after(0, lambda: self.run_btn.config(state="normal"))
             self.root.after(0, lambda: self.progress_label.config(text="Done."))
 
-    # -- Image folder ---------------------------------------------------------
+    # Image folder
 
-    def _run_image_analysis(self, folder: str, detector: Optional[YOLODetector]):
-        threshold = int(self.threshold_var.get())
+    def _run_image_analysis(self, folder: str):
+        threshold   = int(self.threshold_var.get())
+        hash_key    = self.hash_method_var.get()
+        hash_type   = HASH_METHODS.get(hash_key, "phash")
         self.log("Scanning images...")
         items = build_image_items(
             folder,
             progress_cb=lambda cur, tot, name:
                 self._set_progress(cur, tot, f"Analyzing: {name}"),
-            detector=detector,
         )
         if not items:
             self.log("No images found.")
             return
-        self.log(f"Found {len(items)} image(s). Running similarity analysis...")
-        assign_image_buckets(items, threshold=threshold)
+        self.log(f"Found {len(items)} image(s). Running similarity analysis ({hash_key})...")
+        assign_image_buckets(items, threshold=threshold, hash_type=hash_type)
 
         buckets: dict = defaultdict(list)
         for it in items:
-            buckets[it.bucket_phash].append(it.filename)
-        similar_groups = {k: v for k, v in buckets.items() if len(v) > 1}
-        self.log(f"   -> {len(similar_groups)} pHash group(s) found.")
-        for bid, names in similar_groups.items():
+            if it.bucket_phash != -1:
+                buckets[it.bucket_phash].append(it.filename)
+        self.log(f"   -> {len(buckets)} {hash_key} group(s) found.")
+        for bid, names in buckets.items():
             self.log(f"     Group {bid}: {', '.join(names)}")
-        dbscan_clusters = {it.bucket_dbscan for it in items if it.bucket_dbscan != -1}
-        self.log(f"   -> {len(dbscan_clusters)} DBSCAN cluster(s) found.")
-        if detector:
-            self.log(f"   -> AI detections in "
-                     f"{sum(1 for it in items if it.detected_objects)} image(s).")
         self.log("Opening results preview...")
-        self.root.after(0, lambda: ResultsWindow(self.root, "Image", image_items=items))
+        self.root.after(0, lambda: ResultsWindow(self.root, "Image", image_items=items,
+                                                  initial_threshold=threshold,
+                                                  hash_type=hash_type))
 
-    # -- Single image ---------------------------------------------------------
+    # Single image
 
-    def _run_single_image_analysis(self, path: str, detector: Optional[YOLODetector]):
+    def _run_single_image_analysis(self, path: str):
         self.log(f"Analyzing single image: {os.path.basename(path)}")
-        item = analyze_single_image(Path(path), detector=detector)
+        item = analyze_single_image(Path(path))
         if item is None:
             self.log("Could not open or process the image.")
             return
-        self.log(f"   Size: {item.width}x{item.height}  |  {item.bytes} bytes  |  {item.ext}")
+        self.log(f"   Size: {item.width}x{item.height}  |  {item.ext}")
+        self.log(f"   pHash: {item.phash}")
         self.log(f"   Brightness: {item.avg_brightness}  |  Contrast: {item.avg_contrast}")
-        self.log(f"   Dominant colors: {item.dominant_color_1}, "
-                 f"{item.dominant_color_2}, {item.dominant_color_3}")
-        if item.detected_objects:
-            self.log(f"   AI detections: {item.detected_objects}")
         self.log("Opening results preview...")
         self.root.after(0, lambda: ResultsWindow(self.root, "Single Image",
                                                   image_items=[item]))
 
-    # -- Video folder ---------------------------------------------------------
+    # Video folder
 
-    def _run_video_analysis(self, folder: str, detector: Optional[YOLODetector]):
+    def _run_video_analysis(self, folder: str):
         try:
             interval = float(self.interval_var.get())
         except ValueError:
@@ -1343,21 +1501,18 @@ class MediaAnalyzerGUI:
                 ))
 
             analyzer.compare_videos(v1, v2, interval=interval,
-                                    progress_cb=on_progress, detector=detector)
+                                    progress_cb=on_progress)
 
         self.log(f"Done. {len(analyzer.results)} frame comparison(s) recorded.")
-        if detector:
-            self.log(f"   -> AI detections in "
-                     f"{sum(1 for r in analyzer.results if r.detected_objects)} frame(s).")
         self.log("Opening results preview...")
         results_copy = list(analyzer.results)
         self.root.after(0, lambda: ResultsWindow(self.root, "Video",
                                                   video_results=results_copy,
                                                   video_paths=files))
 
-    # -- Single video ---------------------------------------------------------
+    # Single video
 
-    def _run_single_video_analysis(self, path: str, detector: Optional[YOLODetector]):
+    def _run_single_video_analysis(self, path: str):
         try:
             interval = float(self.interval_var.get())
         except ValueError:
@@ -1369,19 +1524,15 @@ class MediaAnalyzerGUI:
         sv.analyze(
             path, interval=interval,
             progress_cb=lambda cur, tot, lbl: self._set_progress(cur, tot, lbl),
-            detector=detector,
         )
         self.log(f"   Duration: {sv.duration}s  |  FPS: {sv.fps:.1f}  |  "
                  f"Resolution: {sv.width}x{sv.height}  |  Codec: {sv.codec}")
         self.log(f"   Frames sampled: {len(sv.frames)}")
-        if detector:
-            self.log(f"   -> AI detections in "
-                     f"{sum(1 for f in sv.frames if f.detected_objects)} frame(s).")
         self.log("Opening results preview...")
         self.root.after(0, lambda: ResultsWindow(self.root, "Single Video",
                                                   single_video=sv))
 
-    # -- About dialog ---------------------------------------------------------
+    # About dialog 
 
     def _show_about(self):
         popup = tk.Toplevel(self.root)
@@ -1400,10 +1551,8 @@ class MediaAnalyzerGUI:
         info.pack()
         lines = [
             ("Developed by:",    "Jackson Allen"),
-            ("Partner:",         "Williamson County District Attorney's Office"),
-            ("All processing:",  "100% local. No data leaves the machine"),
             ("AI runtime:",      "Ollama (Llama 3 + LLaVA)"),
-            ("Object detection:","YOLOv8 via Ultralytics"),
+            ("Hashing:",          "imagehash (pHash, dHash, aHash, bHash)"),
         ]
         for label, value in lines:
             row = tk.Frame(info)

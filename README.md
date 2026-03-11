@@ -1,51 +1,46 @@
 # Media Analyzer
 
-A forensic media analysis tool built for law enforcement investigations. 100% local. No data ever leaves the machine.
+A forensic media analysis tool for law enforcement investigations. All processing is 100% local. No data ever leaves the machine.
 
-Developed as a capstone project in partnership with the **Williamson County District Attorney's Office** (Georgetown, TX).
-
----
-
-## What It Does
-
-Media Analyzer helps investigators make sense of large collections of images and videos by automating the tedious work of comparison, grouping, flagging, and documentation.
+Media Analyzer helps investigators make sense of large collections of seized images and videos by automating comparison, grouping, flagging, and documentation.
 
 **Image Analysis**
-- Computes three independent perceptual hashes (pHash, aHash, dHash) and groups visually similar images automatically
-- DBSCAN clustering as a second-pass similarity check independent of hashing
-- Bhattacharyya color histogram distance between grouped images
-- K-means dominant color extraction per image, displayed as color swatches in the results table
-- Brightness and contrast profiling
+
+- Computes four independent perceptual hashes per image: pHash, aHash, dHash, and bHash (wavelet)
+- Groups visually similar images using Union-Find with a tunable Hamming distance threshold
+- Mean hash distance computed for every image within a group, so you can see how tight or loose a group is
+- Brightness and contrast profiling per image
+- Full EXIF metadata extraction: date taken, camera make and model, GPS coordinates, and a clickable Google Maps link when GPS is present
+- HEIC/HEIF support for iPhone photos
 
 **Video Analysis**
+
 - Frame-by-frame comparison of video pairs using SSIM, MSE, and PSNR
-- Per-frame motion scoring, brightness, contrast, and dominant color tracking
+- Per-frame motion scoring and brightness/contrast tracking
 - Single-video frame profiling mode
 
-**AI Tools** *(optional, local only)*
-- YOLO v8 object detection (nano / small / medium models)
+**AI Tools** (optional, local only)
+
+- LLaVA visual descriptions for individual images and video frames in natural language
+- Automatic threat flagging: LLaVA scans images and video frames for weapons, drugs, contraband, and suspicious activity. Flagged content triggers a popup alert, turns the summary panel red, and highlights the row in the results table.
 - Llama 3 plain-English forensic narrative via Ollama. No API keys, no internet required.
-- LLaVA visual descriptions for images and video frames in natural language
-- **Automatic threat flagging** -- LLaVA scans images and video frames for weapons, drugs, contraband, and suspicious activity. Flagged content triggers a popup alert, turns the summary panel red, and highlights the row in the results table.
 
 **Security and Documentation**
-- All image thumbnails blurred by default. Password required to unlock viewing.
+
+- All image thumbnails blurred by default. Password required to unlock full viewing.
 - Double-click any row to preview the full image (authorized users only)
+- Live threshold slider in the results window so investigators can tune grouping without re-running the analysis
+- View Groups popup: scrollable side-by-side thumbnail view of every similarity group
+- Export grouped images only: CSV and PDF exports can be filtered to grouped images exclusively
 - One-click CSV export for every analysis mode
-- One-click PDF report with cover page, statistics table, AI narrative, and full findings
-
----
-
-## Screenshots
-
-*(Add screenshots here once you have them. Drag and drop into the GitHub editor.)*
+- One-click PDF report with cover page, statistics table, AI narrative section, and full findings table
 
 ---
 
 ## Requirements
 
-- **Python 3.9+**
-- **Ollama** *(optional -- only needed for AI summaries, visual descriptions, and threat flagging)*
+- Python 3.9+
+- Ollama (optional, only needed for AI summaries, LLaVA descriptions, and threat flagging)
 
 ---
 
@@ -54,7 +49,7 @@ Media Analyzer helps investigators make sense of large collections of images and
 ### 1. Clone the repo
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/media-analyzer.git
+git clone https://github.com/AI-Dev-WilCo-Capstone/media-analyzer.git
 cd media-analyzer
 ```
 
@@ -64,37 +59,27 @@ cd media-analyzer
 python install.py
 ```
 
-This will:
-- Verify your Python version
-- Install all Python dependencies automatically
-- Check whether Ollama is installed and running
-- Pull llama3 and llava-llama3 if Ollama is available
+This will verify your Python version, install all dependencies, check whether Ollama is running, and pull the required models if available. If anything cannot be done automatically, the script will tell you exactly what to do.
 
-That's it. If anything can't be done automatically, the script will tell you exactly what to do.
-
----
-
-### Manual install (if you prefer)
+### Manual install
 
 ```bash
 pip install -r requirements.txt
 ```
 
----
+### Ollama setup (for AI features)
 
-### Ollama setup *(for AI features)*
-
-Ollama is a separate application that runs language models locally. It is **not required** to use Media Analyzer. All analysis, export, and blur features work without it. Ollama is only needed for AI summaries, LLaVA visual descriptions, and threat flagging.
+Ollama is a separate application that runs language models locally. It is not required to use Media Analyzer. All analysis, hashing, grouping, export, and blur features work without it. Ollama is only needed for AI summaries, LLaVA visual descriptions, and threat flagging.
 
 **Install Ollama:**
 
 | Platform | Instructions |
 |---|---|
-| macOS | `brew install ollama` or [download from ollama.com](https://ollama.com/download) |
-| Windows | [Download OllamaSetup.exe](https://ollama.com/download) and run it |
+| macOS | `brew install ollama` or download from ollama.com |
+| Windows | Download OllamaSetup.exe from ollama.com and run it |
 | Linux | `curl -fsSL https://ollama.com/install.sh \| sh` |
 
-**Then pull the models and start the server:**
+**Pull the models and start the server:**
 
 ```bash
 ollama pull llama3
@@ -102,7 +87,7 @@ ollama pull llava-llama3
 ollama serve
 ```
 
-**Note:** `llava-llama3` is the recommended vision model. The older `llava` build may produce garbled output depending on your Ollama version. If you already have Ollama running in the background (which is common on Windows), you do not need to run `ollama serve` manually.
+Note: `llava-llama3` is the recommended vision model. If you already have Ollama running in the background (common on Windows), you do not need to run `ollama serve` manually.
 
 ---
 
@@ -112,36 +97,65 @@ ollama serve
 python main.py
 ```
 
-### Modes
+### Analysis Modes
 
 | Mode | What it does |
 |---|---|
-| **Images (folder)** | Analyzes all images in a folder. Hashing, grouping, color analysis, optional LLaVA flagging. |
-| **Single Image** | Full profile of one image file, including LLaVA visual description and threat flagging. |
-| **Videos (folder)** | Pairwise comparison of all videos in a folder. |
-| **Single Video** | Per-frame analysis of one video file with optional LLaVA visual description. |
+| Images (folder) | Analyzes all images in a folder. Hashing, grouping, EXIF, optional LLaVA flagging. |
+| Single Image | Full profile of one image file including LLaVA visual description and threat flagging. |
+| Videos (folder) | Pairwise comparison of all videos in a folder using SSIM, MSE, and PSNR. |
+| Single Video | Per-frame analysis of one video file with optional LLaVA visual description. |
 
 ### Options
 
 - **Interval (s):** how often to sample frames in video modes (default 0.5s)
-- **pHash threshold:** how similar two images must be to be grouped (default 6; lower = stricter)
-- **YOLO detection:** enable AI object detection with your choice of model size
+- **Hash method:** which hash algorithm to use for grouping. Options are pHash, dHash, aHash, bHash, and Combined (min). See Hash Methods below.
+- **Threshold:** maximum Hamming distance allowed between two images before they are considered too different to group (default 6, lower is stricter). This is a real unit: the number of bits allowed to differ between two 64-bit hash fingerprints.
+
+### Hash Methods
+
+| Method | Best for |
+|---|---|
+| pHash | General use. Tolerant of compression, minor resizing, slight color shifts. |
+| dHash | Catching crops and translations. Sensitive to structural edge shifts. |
+| aHash | Fast near-duplicate detection. Less precise, good for obvious matches. |
+| bHash | Resistant to localized edits like watermarks or corner logos. |
+| Combined (min) | Conservative grouping. Images group only if at least one hash considers them similar. |
+
+The Hamming distance threshold has the same unit regardless of which method is active: bits differing out of 64.
+
+### Live Threshold Slider
+
+After running an image analysis, the results window includes a live threshold slider. Dragging it re-runs the Union-Find grouping instantly without re-analyzing the images. This lets investigators tune sensitivity in real time.
+
+### View Groups
+
+The View Groups button opens a scrollable popup showing every similarity group side by side as thumbnails, sorted by group size. Each group header shows the group ID, image count, and mean hash distance. Thumbnails are blurred until access is authorized.
 
 ### LLaVA Visual Analysis and Threat Flagging
 
 After running any image or video analysis, the results window includes AI buttons in the summary panel:
 
-- **"Analyze with LLaVA"** (image modes): sends the image to LLaVA for a detailed forensic description. LLaVA also scans for weapons, drugs, contraband, violence, and other suspicious content. If anything is flagged, a popup alert fires immediately, the summary panel turns red, and the image's row in the results table is highlighted red.
-- **"Generate Visual Description"** (video modes): LLaVA describes each sampled frame, then Llama 3 synthesizes all descriptions into a chronological forensic narrative.
+- **Analyze with LLaVA** (image modes): sends the selected image to LLaVA for a detailed forensic description. LLaVA also scans for weapons, drugs, contraband, violence, and other suspicious content. If anything is flagged, a popup alert fires, the summary panel turns red, and the row in the results table is highlighted red.
+- **Generate Visual Description** (video modes): LLaVA describes each sampled frame, then Llama 3 synthesizes all descriptions into a chronological forensic narrative.
 
 All LLaVA processing runs locally through Ollama. No image data is transmitted externally.
 
 ### Authorization
 
-Image content is blurred by default. Click **Authorize Access** in the results window and enter the investigator password to unlock viewing.
+Image content is blurred by default. Click Authorize Access in the results window and enter the investigator password to unlock viewing.
 
-> Default demo password: `wilco2025`
-> Change this in `constants.py` before deployment.
+Default demo password: `wilco2025`
+
+Change this in `constants.py` before deployment.
+
+### Exporting
+
+**CSV:** exports all columns for every analyzed image or video frame as a flat CSV file.
+
+**PDF Report:** generates a formatted report with a cover banner, summary statistics, AI narrative (if available), and a full findings table.
+
+**Export grouped images only:** checking this box before exporting filters both the CSV and PDF to only images that belong to a similarity group. If no groups exist at the current threshold, the export is cancelled with a message rather than producing an empty file. The PDF cover will note "Scope: Grouped Images Only" so the report is self-documenting.
 
 ---
 
@@ -150,40 +164,41 @@ Image content is blurred by default. Click **Authorize Access** in the results w
 ```
 media_analyzer/
 |
-|-- main.py           Entry point. Run this.
+|-- main.py           Entry point
 |-- install.py        One-shot setup script
 |-- requirements.txt  Python dependencies
 |
-|-- constants.py      Password, Ollama config, column definitions
+|-- constants.py      Password, Ollama config, column definitions, hash methods
 |-- models.py         ImageItem, VideoFrameResult, SingleVideoFrame dataclasses
-|-- analysis.py       Image/video analysis, metrics, hashing, bucketing, CSV export
-|-- ai.py             YOLO, Llama 3 summary, LLaVA visual analysis and threat flagging
+|-- analysis.py       All image/video analysis, hashing, bucketing, EXIF, CSV export
+|-- ai.py             Llama 3 summary, LLaVA visual analysis and threat flagging
 |-- pdf_report.py     PDF report generator (ReportLab)
-|-- gui.py            ResultsWindow and MediaAnalyzerGUI (tkinter)
+|-- gui.py            ResultsWindow and main MediaAnalyzerGUI (tkinter)
 ```
 
 ---
 
 ## Similarity Metrics Explained
 
-### Image Metrics
+### Image Hashing
 
-| Metric | What it measures | Investigative use |
+All four hashes produce a 64-bit fingerprint. The Hamming distance between two fingerprints counts how many bits differ. The threshold controls how many bit differences are tolerated before two images are considered different.
+
+| Hash | Algorithm | Strengths |
 |---|---|---|
-| **pHash** | Perceptual hash, tolerant of resize and compression | Groups visually similar images even across different saves |
-| **aHash** | Average hash, fast, good for near-duplicates | Cross-checks pHash groupings |
-| **dHash** | Difference hash, edge-sensitive | Catches edits that preserve average tone but change content |
-| **DBSCAN** | Density-based clustering on aHash and dHash | Finds groups pHash misses. -1 means unique image with no close matches. |
-| **Bhattacharyya** | Color histogram distance | Measures how similarly colored images within a group are |
+| pHash | Discrete cosine transform on an 8x8 frequency grid | Best general-purpose, handles compression and minor edits |
+| dHash | Compares adjacent pixel gradients left-to-right | Sensitive to crops and translations |
+| aHash | Pixels above/below mean brightness | Fast, catches obvious duplicates |
+| bHash | Wavelet transform | Robust against localized edits |
 
 ### Video Metrics
 
 | Metric | What it measures | Scale |
 |---|---|---|
-| **SSIM %** | Structural similarity | 100% = identical, 0% = completely different |
-| **MSE** | Mean squared pixel error | Lower = more similar |
-| **PSNR (dB)** | Signal-to-noise ratio | 100 dB = identical, above 50 dB = near-exact copy |
-| **Motion Score** | Frame activity | Higher = more movement |
+| SSIM % | Structural similarity between frames | 100% identical, 0% completely different |
+| MSE | Mean squared pixel error | Lower means more similar |
+| PSNR (dB) | Signal-to-noise ratio | Above 50 dB is a near-exact copy |
+| Motion Score | Frame activity vs blurred version | Higher means more movement or scene change |
 
 ---
 
@@ -191,30 +206,14 @@ media_analyzer/
 
 | Package | Purpose |
 |---|---|
-| `opencv-python` | Image/video I/O, color analysis, frame processing |
-| `Pillow` | Image loading, thumbnail generation, blur |
-| `imagehash` | pHash, aHash, dHash computation |
-| `scikit-image` | SSIM calculation |
-| `scikit-learn` | DBSCAN clustering |
-| `numpy` | Numerical operations across pixel data |
-| `ultralytics` | YOLOv8 object detection |
-| `reportlab` | PDF report generation |
-| `ollama` *(external)* | Local LLM runtime for Llama 3 and LLaVA |
+| opencv-python | Image and video I/O, color analysis, frame processing |
+| Pillow | Image loading, thumbnail generation, blur |
+| imagehash | pHash, aHash, dHash, bHash computation |
+| scikit-image | SSIM calculation for video comparison |
+| numpy | Numerical operations across pixel data |
+| reportlab | PDF report generation |
+| pillow-heif | HEIC/HEIF support for iPhone photos |
+| exifread | EXIF metadata parsing |
+| ollama (external) | Local LLM runtime for Llama 3 and LLaVA |
 
 ---
-
-## Legal and Privacy
-
-- All processing is **100% local**. No images, videos, or analysis results are ever transmitted to any external server.
-- Original files are **never modified**.
-- Image content is **blurred by default** and requires password authorization to view.
-- AI-generated descriptions and threat flags are analytical aids only. They require human verification before use in legal proceedings.
-- Designed for use by authorized law enforcement personnel only.
-
----
-
-## Acknowledgements
-
-Built as part of the Texas State University Computer Science capstone program in collaboration with the Williamson County District Attorney's Office.
-
-Previous capstone cohort tools that informed this work: the Virgil audio transcription tool and the original image comparison tool (Spring 2025).

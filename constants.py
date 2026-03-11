@@ -1,43 +1,33 @@
-# =============================================================================
 # constants.py
 # Shared constants, file extension sets, and table column definitions.
-# =============================================================================
 
-# -- Authentication -----------------------------------------------------------
+# Authentication
 # Demo password for authorized image viewing.
-# Change before deployment -- in production this should be hashed and stored securely.
+# Change before deployment! In production this should be hashed and stored securely.
 DEMO_PASSWORD = "wilco2025"
 
-# -- Ollama -------------------------------------------------------------------
+# Ollama
 OLLAMA_URL      = "http://localhost:11434/api/generate"
 OLLAMA_CHAT_URL = "http://localhost:11434/api/chat"
 OLLAMA_MODEL    = "llama3"
 OLLAMA_LLAVA    = "llava-llama3"
 
-# -- File extensions ----------------------------------------------------------
+# File extensions
 IMG_EXTS = frozenset({".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif", ".heic", ".heif"})
 VID_EXTS = frozenset({".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv", ".webm", ".m4v"})
 
-# -- Results table column definitions: (field_name, header_label, width_px) --
+# Results table column definitions: (field_name, header_label, width_px)
 IMAGE_PREVIEW_COLS = [
-    ("_thumb",               "Preview",      72),   # special-cased thumbnail column
     ("id",                   "ID",           40),
     ("filename",             "Filename",    160),
     ("ext",                  "Type",         45),
-    ("bytes",                "Size (B)",     75),
-    ("width",                "W",            50),
-    ("height",               "H",            50),
-    ("aspect_ratio",         "Ratio",        55),
-    ("avg_brightness",       "Bright.",      65),
+    ("width",                "W (px)",       55),
+    ("height",               "H (px)",       55),
+    ("avg_brightness",       "Bright.",      60),
     ("avg_contrast",         "Contrast",     65),
-    ("dominant_color_1",     "Color 1",      62),
-    ("dominant_color_2",     "Color 2",      62),
-    ("dominant_color_3",     "Color 3",      62),
-    ("hist_bhattacharyya",   "Bhatt. Dist.", 85),
-    ("detected_objects",     "Objects",     180),
-    ("detection_confidence", "Conf.",        140),
-    ("bucket_phash",         "pHash Grp",    70),
-    ("bucket_dbscan",        "DBSCAN Grp",   75),
+    ("hash_value",           "Hash Value",  140),
+    ("bucket_phash",         "Hash Group",   80),
+    ("hash_dist",            "Hash Dist.",   72),
     ("exif_datetime",        "Date Taken",  130),
     ("exif_camera_make",     "Camera Make",  95),
     ("exif_camera_model",    "Camera Model",110),
@@ -55,24 +45,17 @@ VIDEO_PREVIEW_COLS = [
     ("similarity_mse",        "MSE",           65),
     ("similarity_psnr",       "PSNR (dB)",     75),
     ("motion_score",          "Motion",        65),
-    ("detected_objects",      "Objects",      180),
-    ("detection_confidence",  "Conf.",         140),
 ]
 
 SINGLE_VIDEO_COLS = [
     ("frame_id",              "Frame",         50),
     ("timestamp",             "Time (s)",      70),
-    ("motion_score",          "Motion",        70),
+    ("motion_score",          "Motion",        75),
     ("avg_brightness",        "Brightness",    80),
     ("avg_contrast",          "Contrast",      70),
-    ("dominant_color_1",      "Color 1",       65),
-    ("dominant_color_2",      "Color 2",       65),
-    ("dominant_color_3",      "Color 3",       65),
-    ("detected_objects",      "Objects",      200),
-    ("detection_confidence",  "Conf.",         150),
 ]
 
-# -- Column help text (right-click any header to see this) --------------------
+# Column help text (right-click any header to see this)
 COLUMN_HELP = {
     "_thumb": (
         "Preview",
@@ -92,13 +75,8 @@ COLUMN_HELP = {
     ),
     "ext": (
         "Type",
-        "The file extension, indicating the image format (e.g. .jpg, .png, .bmp). "
+        "The file extension, indicating the image format (.jpg, .png, .bmp, etc.). "
         "Different formats use different compression methods which can affect analysis results."
-    ),
-    "bytes": (
-        "Size (B)",
-        "The file size in bytes. Unusually small files may indicate heavy compression or cropping. "
-        "Two visually identical images with very different file sizes may have been processed differently."
     ),
     "width": (
         "Width (px)",
@@ -107,12 +85,6 @@ COLUMN_HELP = {
     "height": (
         "Height (px)",
         "The vertical resolution of the image in pixels."
-    ),
-    "aspect_ratio": (
-        "Aspect Ratio",
-        "The proportional relationship between width and height, expressed as W:H. "
-        "Common ratios include 4:3 (older cameras), 16:9 (widescreen), and 1:1 (square). "
-        "An unusual ratio may indicate the image has been cropped."
     ),
     "avg_brightness": (
         "Brightness",
@@ -126,54 +98,32 @@ COLUMN_HELP = {
         "contains a wider range of light and dark areas. A very low contrast score may indicate "
         "a washed-out, foggy, or heavily filtered image."
     ),
-    "dominant_color_1": (
-        "Dominant Color 1",
-        "The most prevalent color in the image, identified using K-means clustering. "
-        "Displayed as a hex color code (e.g. #3A2F1C) with a color swatch in the preview strip. "
-        "Useful for grouping images by scene or environment."
+    "hash_dist": (
+        "Hash Distance",
+        "The mean Hamming distance between this image and its group peers, using whichever "
+        "hash method was selected before running analysis. "
+        "Hamming distance counts the number of bits that differ between two hash values. "
+        "A lower score means the images are more visually similar to each other. "
+        "0.0 means all group members are nearly identical under the chosen method. "
+        "Only populated for images that belong to a similarity group."
     ),
-    "dominant_color_2": (
-        "Dominant Color 2",
-        "The second most prevalent color in the image. "
-        "Together with Color 1 and Color 3, these three colors represent the overall "
-        "color palette of the image."
-    ),
-    "dominant_color_3": (
-        "Dominant Color 3",
-        "The third most prevalent color in the image. "
-        "Comparing dominant colors across a group of images can help confirm they were "
-        "taken in the same environment or under similar lighting conditions."
-    ),
-    "hist_bhattacharyya": (
-        "Bhattacharyya Distance",
-        "A measure of how similar the color distributions are between images in the same "
-        "pHash similarity group. Calculated using color histograms across all three color channels. "
-        "A score of 0.0 means the color distributions are identical. "
-        "Higher scores indicate greater color difference. "
-        "Only computed for images that share a pHash group -- single images will show 0."
-    ),
-    "detected_objects": (
-        "Detected Objects",
-        "Objects identified in the image by the YOLO AI detection model. "
-        "YOLO (You Only Look Once) is a computer vision system that draws bounding boxes "
-        "around recognized objects and labels them. Only available when AI detection is enabled "
-        "before running the analysis. Common detections include person, car, phone, backpack, etc."
-    ),
-    "detection_confidence": (
-        "Detection Confidence",
-        "The confidence score (0.0 to 1.0) for each detected object, indicating how certain "
-        "the YOLO model is about its identification. A score of 0.90 means 90% confidence. "
-        "Scores below the minimum threshold set before analysis are filtered out automatically."
+    "hash_value": (
+        "Hash Value",
+        "The raw hash fingerprint for this image under the method selected before analysis. "
+        "Each hash is a 64-bit value represented as a hex string. "
+        "You can compare these values across rows, as images with very similar hex strings "
+        "are visually similar under that hash method. "
+        "The Hamming distance between two hashes (how many bits differ) determines grouping. "
+        "Switch hash methods in the main window before running to see a different fingerprint here."
     ),
     "bucket_phash": (
-        "pHash Group",
-        "The similarity group this image was assigned to using perceptual hashing (pHash). "
-        "pHash generates a fingerprint of the image based on its visual structure. "
-        "Images with fingerprints within a set distance of each other are placed in the same group. "
-        "Images that share a group number are visually similar. "
-        "Yellow rows in the table indicate images that belong to a group with at least one other image. "
-        "The threshold for grouping can be adjusted before running the analysis -- "
-        "lower values are stricter."
+        "Hash Group",
+        "The similarity group this image was assigned to using the selected hash method. "
+        "Images whose hash values fall within the chosen Hamming distance threshold are "
+        "placed in the same group. Images that share a group number are visually similar. "
+        "Yellow rows indicate images that belong to a group with at least one other image. "
+        "A value of -1 or blank means this image had no match at the current threshold. "
+        "The hash method and threshold can both be adjusted before running the analysis."
     ),
     "exif_datetime": (
         "Date Taken",
@@ -222,14 +172,6 @@ COLUMN_HELP = {
         "Copy and paste this URL into a browser to see exactly where the photo was taken. "
         "Only present when both latitude and longitude are available in the EXIF data."
     ),
-    "bucket_dbscan": (
-        "DBSCAN Group",
-        "A second-pass similarity grouping using DBSCAN (Density-Based Spatial Clustering). "
-        "Unlike pHash which compares images one-to-one, DBSCAN looks at the entire dataset "
-        "at once and finds natural clusters based on combined aHash and dHash feature vectors. "
-        "A value of -1 means the image was classified as unique -- no close neighbors were found. "
-        "DBSCAN can catch similarity patterns that pHash misses."
-    ),
     "video_pair_1": (
         "Video 1",
         "The filename of the first video in a comparison pair. "
@@ -253,7 +195,7 @@ COLUMN_HELP = {
         "SSIM (Structural Similarity)",
         "A measure of how visually similar two video frames are, expressed as a percentage. "
         "100% means the frames are structurally identical. 0% means completely different. "
-        "SSIM accounts for luminance, contrast, and structure -- making it more sensitive "
+        "SSIM accounts for luminance, contrast, and structure, thus making it more sensitive "
         "than simple pixel comparison. Scores above 90% suggest near-duplicate footage."
     ),
     "similarity_mse": (
@@ -261,7 +203,7 @@ COLUMN_HELP = {
         "The average squared difference between corresponding pixels in two frames. "
         "Lower values mean the frames are more similar at the pixel level. "
         "A score of 0.0 means the frames are pixel-perfect identical. "
-        "Unlike SSIM, MSE does not account for perceptual structure -- "
+        "Unlike SSIM, MSE does not account for perceptual structure, so "
         "a slight brightness shift can produce a high MSE even if the frames look the same."
     ),
     "similarity_psnr": (
@@ -280,3 +222,4 @@ COLUMN_HELP = {
         "or significant event in the footage."
     ),
 }
+

@@ -1,8 +1,6 @@
-# =============================================================================
 # ai.py
 # YOLO object detection wrapper, Ollama/Llama3 AI summary generation,
 # and LLaVA visual description with threat flagging.
-# =============================================================================
 
 import numpy as np
 from dataclasses import asdict
@@ -15,15 +13,13 @@ from constants import OLLAMA_URL, OLLAMA_CHAT_URL, OLLAMA_MODEL, OLLAMA_LLAVA
 from models import ImageItem, VideoFrameResult
 
 
-# =============================================================================
 # YOLO DETECTOR
-# =============================================================================
 
 class YOLODetector:
     MODEL_OPTIONS = {
-        "Nano  (fastest, less accurate)":  "yolov8n.pt",
-        "Small (good balance)":            "yolov8s.pt",
-        "Medium (most accurate, slower)":  "yolov8m.pt",
+        "Nano: fastest, less accurate":  "yolov8n.pt",
+        "Small: good balance":            "yolov8s.pt",
+        "Medium: most accurate, slower":  "yolov8m.pt",
     }
 
     def __init__(self, model_size: str = "yolov8n.pt"):
@@ -65,9 +61,9 @@ class YOLODetector:
         return self.detect(bgr, confidence)
 
 
-# =============================================================================
+
 # OLLAMA AI SUMMARY
-# =============================================================================
+
 
 def build_ai_summary(mode: str,
                      image_items: Optional[List[ImageItem]] = None,
@@ -84,45 +80,28 @@ def build_ai_summary(mode: str,
         rows  = [asdict(it) for it in image_items]
         total = len(rows)
 
+        # Correctly compute groups... -1 means unique, anything else is a group bucket
         bc: dict = defaultdict(int)
         for r in rows:
-            bc[r.get("bucket_phash", -1)] += 1
-        similar_groups = {k: v for k, v in bc.items() if v > 1}
-        n_groups       = len(similar_groups)
-        n_in_groups    = sum(similar_groups.values())
+            bid = r.get("bucket_phash", -1)
+            if bid != -1:
+                bc[bid] += 1
+        n_groups    = len(bc)
+        n_in_groups = sum(bc.values())
+        n_unique    = total - n_in_groups
+        largest     = max(bc.values(), default=0)
 
         bvals = [r["avg_brightness"] for r in rows if "avg_brightness" in r]
         avg_b = round(sum(bvals) / len(bvals), 1) if bvals else 0
 
-        all_objects: dict = defaultdict(int)
-        for r in rows:
-            for obj in r.get("detected_objects", "").split(","):
-                obj = obj.strip()
-                if obj:
-                    all_objects[obj] += 1
-        obj_summary = (
-            ", ".join(f"{k} ({v}x)" for k, v in
-                      sorted(all_objects.items(), key=lambda x: -x[1]))
-            or "none detected"
-        )
-
-        color_counts: dict = defaultdict(int)
-        for r in rows:
-            for key in ("dominant_color_1", "dominant_color_2", "dominant_color_3"):
-                c = r.get(key, "").strip()
-                if c:
-                    color_counts[c] += 1
-        top_colors = ", ".join(
-            k for k, _ in sorted(color_counts.items(), key=lambda x: -x[1])[:5]
-        )
-
         findings = (
             f"Mode: Image analysis\n"
             f"Total images analyzed: {total}\n"
-            f"Similar image groups (pHash): {n_groups} group(s) containing {n_in_groups} image(s)\n"
+            f"Images with no similarity match (unique): {n_unique}\n"
+            f"pHash similarity groups found: {n_groups}\n"
+            f"Images that belong to a similarity group: {n_in_groups}\n"
+            f"Largest group size: {largest if largest > 0 else 'N/A'}\n"
             f"Average image brightness (0-255): {avg_b}\n"
-            f"AI-detected objects: {obj_summary}\n"
-            f"Most common dominant colors (hex): {top_colors}\n"
         )
 
     elif mode in ("Video", "Single Video") and video_results:
@@ -132,18 +111,6 @@ def build_ai_summary(mode: str,
         sims    = [r["similarity_ssim"] for r in rows]
         motions = [r["motion_score"]    for r in rows]
 
-        all_objects: dict = defaultdict(int)
-        for r in rows:
-            for obj in r.get("detected_objects", "").split(","):
-                obj = obj.strip()
-                if obj:
-                    all_objects[obj] += 1
-        obj_summary = (
-            ", ".join(f"{k} ({v}x)" for k, v in
-                      sorted(all_objects.items(), key=lambda x: -x[1]))
-            or "none detected"
-        )
-
         findings = (
             f"Mode: Video analysis\n"
             f"Video pairs compared: {len(pairs)}\n"
@@ -151,7 +118,6 @@ def build_ai_summary(mode: str,
             f"Average SSIM similarity: {round(sum(sims)/len(sims), 1)}%\n"
             f"Max similarity: {round(max(sims), 1)}%   Min: {round(min(sims), 1)}%\n"
             f"Average motion score: {round(sum(motions)/len(motions), 2)}\n"
-            f"AI-detected objects across sampled frames: {obj_summary}\n"
         )
     else:
         return "No data available to summarize."
@@ -161,7 +127,7 @@ def build_ai_summary(mode: str,
         "You are a forensic media analyst assistant helping law enforcement investigators "
         "understand the results of an automated media analysis tool.\n\n"
         "The FINDINGS section below contains the actual recorded values from this specific analysis. "
-        "Use those exact numbers in your report. Do not use placeholders like [insert value] as "
+        "Use those exact numbers in your report. Do not use placeholders like [insert value], as "
         "the real numbers are already provided and you must reference them directly.\n\n"
         "Write a thorough plain-English report interpreting every data point. "
         "For each metric, state the actual recorded value, explain what it measures, "
@@ -208,9 +174,9 @@ def build_ai_summary(mode: str,
         )
 
 
-# =============================================================================
+
 # LLAVA VISUAL DESCRIPTION AND THREAT FLAGGING
-# =============================================================================
+
 
 def _encode_pil_for_llava(pil_img: Image.Image) -> str:
     """Resize to max 640px wide and base64-encode as JPEG for Ollama."""
@@ -281,7 +247,7 @@ def analyze_image_llava(pil_img: Image.Image, filename: str) -> dict:
     prompt = (
         "You are a law enforcement forensic investigator examining evidence. "
         "Look at this image carefully and do two things: "
-        "First, describe in detail what you see. Any people, their clothing and activity, "
+        "First, describe in detail what you see: any people, their clothing and activity, "
         "any objects, the setting, lighting, and any visible text. "
         "Second, state whether the image contains anything of serious investigative concern "
         "such as weapons, drugs, contraband, or violence. "
@@ -394,7 +360,7 @@ def build_llava_narrative(frames_data: list,
         "Below are per-frame descriptions of a video file. Each entry shows the timestamp "
         "and a visual description of what was observed in that frame.\n\n"
         "Your task is to synthesize these into a single, coherent forensic narrative. "
-        "Describe what happens across the video chronologically -- who is present, what they "
+        "Describe what happens across the video chronologically; who is present, what they "
         "are doing, how the scene changes over time, and any details of investigative "
         "significance. Write in clear, formal prose paragraphs. Do not use bullet points. "
         "Be specific about timing where relevant (e.g. 'At approximately 4 seconds...'). "

@@ -1,7 +1,5 @@
-# =============================================================================
 # models.py
 # Dataclasses for all analysis result types.
-# =============================================================================
 
 from dataclasses import dataclass
 
@@ -20,16 +18,14 @@ class ImageItem:
     phash: str
     ahash: str
     dhash: str
+    bhash: str
     avg_brightness: float
     avg_contrast: float
     dominant_color_1: str
     dominant_color_2: str
     dominant_color_3: str
-    hist_bhattacharyya: float = 0.0   # mean Bhattacharyya dist to pHash bucket peers
-    detected_objects: str = ""
-    detection_confidence: str = ""
-    bucket_phash: int = -1            # Union-Find pHash similarity group
-    bucket_dbscan: int = -1           # DBSCAN cluster (-1 = noise / unique)
+    hash_dist: float = 0.0            # mean Hamming distance to group peers (chosen method)
+    bucket_phash: int = -1            # Union-Find similarity group (chosen hash method)
     # EXIF metadata fields (empty string if not present in file)
     exif_datetime: str = ""           # Date/time the photo was taken
     exif_camera_make: str = ""        # Camera manufacturer
@@ -49,8 +45,6 @@ class VideoFrameResult:
     similarity_mse: float
     similarity_psnr: float
     motion_score: float
-    detected_objects: str = ""
-    detection_confidence: str = ""
 
 
 @dataclass
@@ -61,8 +55,3 @@ class SingleVideoFrame:
     motion_score: float
     avg_brightness: float
     avg_contrast: float
-    dominant_color_1: str
-    dominant_color_2: str
-    dominant_color_3: str
-    detected_objects: str = ""
-    detection_confidence: str = ""

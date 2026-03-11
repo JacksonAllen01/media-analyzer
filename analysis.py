@@ -1,8 +1,6 @@
-# =============================================================================
 # analysis.py
 # Image and video analysis: hashing, color, similarity metrics, bucketing,
 # VideoAnalyzer, SingleVideoAnalyzer, and CSV export.
-# =============================================================================
 
 import os
 import csv
@@ -25,12 +23,9 @@ from skimage.metrics import structural_similarity as ssim
 
 from constants import IMG_EXTS, VID_EXTS
 from models import ImageItem, VideoFrameResult, SingleVideoFrame
-from ai import YOLODetector
 
 
-# =============================================================================
 # SIMILARITY METRICS
-# =============================================================================
 
 def compute_mse(f1: np.ndarray, f2: np.ndarray) -> float:
     """Mean Squared Error between two same-size grayscale frames. Lower = more similar."""
@@ -59,9 +54,9 @@ def compute_bhattacharyya(img1: np.ndarray, img2: np.ndarray) -> float:
     return round(dist / 3, 4)
 
 
-# =============================================================================
+
 # COLOR / VISUAL ANALYSIS
-# =============================================================================
+
 
 def analyze_image_color(pil_img: Image.Image, n_colors: int = 3):
     """
@@ -93,9 +88,9 @@ def analyze_image_color(pil_img: Image.Image, n_colors: int = 3):
     return round(avg_brightness, 2), round(avg_contrast, 2), hex_colors
 
 
-# =============================================================================
+
 # EXIF EXTRACTION
-# =============================================================================
+
 
 def extract_exif(img_path: Path) -> dict:
     """
@@ -187,12 +182,12 @@ def extract_exif(img_path: Path) -> dict:
             result["exif_gps_link"] = f"https://maps.google.com/?q={lat},{lon}"
 
     except Exception:
-        pass   # EXIF extraction is best-effort -- never block analysis
+        pass   # EXIF extraction is best-effort...never block analysis
     return result
 
-# =============================================================================
+
 # IMAGE HANDLING
-# =============================================================================
+
 
 def _gcd(a: int, b: int) -> int:
     while b:
@@ -213,8 +208,7 @@ def iter_image_paths(root: Path):
             yield p
 
 
-def analyze_single_image(img_path: Path,
-                         detector: Optional[YOLODetector] = None) -> Optional[ImageItem]:
+def analyze_single_image(img_path: Path) -> Optional[ImageItem]:
     """Analyze one image file and return an ImageItem, or None on failure."""
     try:
         with Image.open(img_path) as im:
@@ -223,10 +217,8 @@ def analyze_single_image(img_path: Path,
             ph   = str(imagehash.phash(im))
             ah   = str(imagehash.average_hash(im))
             dh   = str(imagehash.dhash(im))
+            bh   = str(imagehash.whash(im))   # block/wavelet hash
             brightness, contrast, dom_colors = analyze_image_color(im)
-            det_objects = det_conf = ""
-            if detector:
-                det_objects, det_conf = detector.detect_pil(im)
     except Exception:
         return None
 
@@ -245,13 +237,12 @@ def analyze_single_image(img_path: Path,
         phash=ph,
         ahash=ah,
         dhash=dh,
+        bhash=bh,
         avg_brightness=brightness,
         avg_contrast=contrast,
         dominant_color_1=dom_colors[0],
         dominant_color_2=dom_colors[1],
         dominant_color_3=dom_colors[2],
-        detected_objects=det_objects,
-        detection_confidence=det_conf,
         exif_datetime=exif["exif_datetime"],
         exif_camera_make=exif["exif_camera_make"],
         exif_camera_model=exif["exif_camera_model"],
@@ -262,8 +253,7 @@ def analyze_single_image(img_path: Path,
 
 
 def build_image_items(root_dir: str,
-                      progress_cb: Optional[Callable] = None,
-                      detector: Optional[YOLODetector] = None) -> List[ImageItem]:
+                      progress_cb: Optional[Callable] = None) -> List[ImageItem]:
     """Scan a folder recursively and return a list of ImageItems."""
     root      = Path(root_dir).expanduser().resolve()
     if not root.exists() or not root.is_dir():
@@ -273,7 +263,7 @@ def build_image_items(root_dir: str,
     items: List[ImageItem] = []
 
     for i, img_path in enumerate(all_paths):
-        item = analyze_single_image(img_path, detector=detector)
+        item = analyze_single_image(img_path)
         if item is None:
             continue
         item.id = len(items) + 1
@@ -284,18 +274,60 @@ def build_image_items(root_dir: str,
     return items
 
 
-def assign_image_buckets(items: List[ImageItem], threshold: int = 6):
+# Hash method options exposed to the GUI
+HASH_METHODS = {
+    "pHash":     "phash",
+    "dHash":     "dhash",
+    "aHash":     "ahash",
+    "bHash":     "bhash",
+    "Combined (min)": "combined",
+}
+
+
+def assign_image_buckets(items: List[ImageItem],
+                         threshold: int = 6,
+                         hash_type: str = "phash"):
     """
-    Two-pass similarity grouping:
-      Pass 1 -- Union-Find on pHash distance    -> bucket_phash
-      Pass 2 -- DBSCAN on aHash+dHash vectors   -> bucket_dbscan
-    Also computes mean Bhattacharyya distance for images within pHash groups.
+    Union-Find similarity grouping using the chosen hash method.
+    Assigns bucket_phash to each item (-1 = unique, no match found).
+    Also computes mean Hamming distance to group peers and stores in hash_dist.
+
+    hash_type: one of 'phash', 'dhash', 'ahash', 'bhash', 'combined'
+    Combined mode takes the minimum Hamming distance across all four hashes --
+    images group together if any single hash considers them similar.
     """
     if not items:
         return
 
-    # -- Pass 1: pHash Union-Find ---------------------------------------------
-    hashes = [imagehash.hex_to_hash(it.phash) for it in items]
+    # -- Resolve hash vectors --------------------------------------------------
+    def get_hash(it: ImageItem):
+        if hash_type == "phash":
+            return imagehash.hex_to_hash(it.phash)
+        elif hash_type == "dhash":
+            return imagehash.hex_to_hash(it.dhash)
+        elif hash_type == "ahash":
+            return imagehash.hex_to_hash(it.ahash)
+        elif hash_type == "bhash":
+            return imagehash.hex_to_hash(it.bhash)
+        return None   # combined handled separately
+
+    # Pre-convert all hashes once to avoid repeated hex_to_hash calls in the O(n^2) loop
+    if hash_type == "combined":
+        ph = [imagehash.hex_to_hash(it.phash) for it in items]
+        dh = [imagehash.hex_to_hash(it.dhash) for it in items]
+        ah = [imagehash.hex_to_hash(it.ahash) for it in items]
+        bh = [imagehash.hex_to_hash(it.bhash) for it in items]
+        hashes = None
+
+        def hamming(i: int, j: int) -> int:
+            return min(ph[i]-ph[j], dh[i]-dh[j], ah[i]-ah[j], bh[i]-bh[j])
+    else:
+        hashes = [get_hash(it) for it in items]
+
+        def hamming(i: int, j: int) -> int:
+            return hashes[i] - hashes[j]
+
+    # -- Union-Find ------------------------------------------------------------
     parent = list(range(len(items)))
 
     def find(a):
@@ -311,7 +343,8 @@ def assign_image_buckets(items: List[ImageItem], threshold: int = 6):
 
     for i in range(len(items)):
         for j in range(i + 1, len(items)):
-            if hashes[i] - hashes[j] <= threshold:
+            dist = hamming(i, j)
+            if dist <= threshold:
                 union(i, j)
 
     root_to_bucket: dict = {}
@@ -323,45 +356,31 @@ def assign_image_buckets(items: List[ImageItem], threshold: int = 6):
             next_bucket += 1
         items[i].bucket_phash = root_to_bucket[r]
 
-    # -- Pass 2: DBSCAN on combined hash features -----------------------------
-    try:
-        from sklearn.cluster import DBSCAN
-
-        def hash_to_bits(h_str: str) -> np.ndarray:
-            h = imagehash.hex_to_hash(h_str)
-            return h.hash.flatten().astype(np.float32)
-
-        features = np.array([
-            np.concatenate([hash_to_bits(it.ahash), hash_to_bits(it.dhash)])
-            for it in items
-        ])
-        db = DBSCAN(eps=10, min_samples=2, metric="hamming").fit(features)
-        for i, label in enumerate(db.labels_):
-            items[i].bucket_dbscan = int(label)
-    except ImportError:
-        pass   # sklearn not installed -- skip silently
-
-    # -- Bhattacharyya distance within pHash groups ---------------------------
-    bucket_members: dict = defaultdict(list)
+    # Mark truly unique images (sole member of their bucket) with -1
+    bucket_member_count: dict = defaultdict(int)
     for it in items:
-        bucket_members[it.bucket_phash].append(it)
+        bucket_member_count[it.bucket_phash] += 1
+    for it in items:
+        if bucket_member_count[it.bucket_phash] == 1:
+            it.bucket_phash = -1
 
-    for members in bucket_members.values():
-        if len(members) < 2:
+    # -- Mean Hamming distance to group peers (hash_dist) ----------------------
+    bucket_members: dict = defaultdict(list)
+    for idx, it in enumerate(items):
+        if it.bucket_phash != -1:
+            bucket_members[it.bucket_phash].append(idx)
+
+    for idxs in bucket_members.values():
+        if len(idxs) < 2:
             continue
-        bgr_imgs = []
-        for m in members:
-            try:
-                img = cv2.imread(m.path)
-                if img is not None:
-                    bgr_imgs.append((m, img))
-            except Exception:
-                pass
-        for m, img in bgr_imgs:
-            dists = [compute_bhattacharyya(img, other_img)
-                     for om, other_img in bgr_imgs if om is not m]
+        for i in idxs:
+            dists = []
+            for j in idxs:
+                if i != j:
+                    d = hamming(i, j)
+                    dists.append(d)
             if dists:
-                m.hist_bhattacharyya = round(sum(dists) / len(dists), 4)
+                items[i].hash_dist = round(sum(dists) / len(dists), 2)
 
 
 def write_image_csv(items: List[ImageItem], out_csv: str):
@@ -376,9 +395,9 @@ def write_image_csv(items: List[ImageItem], out_csv: str):
         writer.writerows(rows)
 
 
-# =============================================================================
+
 # VIDEO HANDLING
-# =============================================================================
+
 
 class VideoAnalyzer:
     """Compares pairs of videos frame-by-frame using SSIM, MSE, and PSNR."""
@@ -396,8 +415,7 @@ class VideoAnalyzer:
 
     def compare_videos(self, path1: str, path2: str,
                        interval: float = 0.5,
-                       progress_cb: Optional[Callable] = None,
-                       detector: Optional[YOLODetector] = None):
+                       progress_cb: Optional[Callable] = None):
         cap1 = cv2.VideoCapture(path1)
         cap2 = cv2.VideoCapture(path2)
         fps1 = cap1.get(cv2.CAP_PROP_FPS)
@@ -427,10 +445,6 @@ class VideoAnalyzer:
             psnr_val   = compute_psnr(mse_val)
             motion     = self.motion_score(gray1)
 
-            det_objects = det_conf = ""
-            if detector:
-                det_objects, det_conf = detector.detect(frame1)
-
             self.results.append(VideoFrameResult(
                 video_pair_1=os.path.basename(path1),
                 video_pair_2=os.path.basename(path2),
@@ -440,8 +454,6 @@ class VideoAnalyzer:
                 similarity_mse=round(mse_val, 2),
                 similarity_psnr=psnr_val,
                 motion_score=round(motion, 2),
-                detected_objects=det_objects,
-                detection_confidence=det_conf,
             ))
             frame_count += 1
             if progress_cb:
@@ -479,8 +491,7 @@ class SingleVideoAnalyzer:
         self._source_path: str = ""   # full path to original file
 
     def analyze(self, path: str, interval: float = 0.5,
-                progress_cb: Optional[Callable] = None,
-                detector: Optional[YOLODetector] = None):
+                progress_cb: Optional[Callable] = None):
         cap = cv2.VideoCapture(path)
         self._source_path = path
         self.filename     = os.path.basename(path)
@@ -509,11 +520,7 @@ class SingleVideoAnalyzer:
 
             motion    = float(np.mean(cv2.absdiff(frame, cv2.blur(frame, (5, 5)))))
             pil_frame = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            brightness, contrast, dom_colors = analyze_image_color(pil_frame)
-
-            det_objects = det_conf = ""
-            if detector:
-                det_objects, det_conf = detector.detect(frame)
+            brightness, contrast, _ = analyze_image_color(pil_frame)
 
             self.frames.append(SingleVideoFrame(
                 frame_id=frame_count,
@@ -521,11 +528,6 @@ class SingleVideoAnalyzer:
                 motion_score=round(motion, 2),
                 avg_brightness=brightness,
                 avg_contrast=contrast,
-                dominant_color_1=dom_colors[0],
-                dominant_color_2=dom_colors[1],
-                dominant_color_3=dom_colors[2],
-                detected_objects=det_objects,
-                detection_confidence=det_conf,
             ))
             frame_count += 1
             if progress_cb:

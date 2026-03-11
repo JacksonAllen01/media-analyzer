@@ -1,7 +1,5 @@
-# =============================================================================
 # pdf_report.py
 # Generates a professional forensic PDF report using ReportLab.
-# =============================================================================
 
 import datetime
 from dataclasses import asdict
@@ -16,7 +14,8 @@ def generate_pdf_report(out_path: str,
                         image_items: Optional[List[ImageItem]] = None,
                         video_results: Optional[List[VideoFrameResult]] = None,
                         single_video=None,
-                        ai_summary: str = "") -> str:
+                        ai_summary: str = "",
+                        groups_only: bool = False) -> str:
     """
     Build and save a forensic PDF report.
     Returns out_path on success.
@@ -39,7 +38,7 @@ def generate_pdf_report(out_path: str,
     WHITE  = colors.white
     BLACK  = colors.black
 
-    # -- Paragraph styles -----------------------------------------------------
+    # Paragraph styles
     def s(sz, **kw):
         return ParagraphStyle("_", fontSize=sz, **kw)
 
@@ -56,7 +55,7 @@ def generate_pdf_report(out_path: str,
     small_s = s(7,  textColor=colors.HexColor("#666666"),
                 fontName="Helvetica", alignment=1)
 
-    # -- Document setup -------------------------------------------------------
+    # Document setup
     doc   = SimpleDocTemplate(out_path, pagesize=letter,
                                leftMargin=0.65*inch, rightMargin=0.65*inch,
                                topMargin=0.65*inch,  bottomMargin=0.65*inch)
@@ -64,11 +63,12 @@ def generate_pdf_report(out_path: str,
     story = []
     ts    = datetime.datetime.now().strftime("%B %d, %Y  %H:%M:%S")
 
-    # -- Cover banner ---------------------------------------------------------
+    # Cover banner 
+    scope_note = "Grouped Images Only" if groups_only else "All Images"
     cover = Table(
         [[Paragraph("MEDIA ANALYZER", title_s)],
          [Paragraph("Forensic Analysis Report", sub_s)],
-         [Paragraph(f"Generated: {ts}  |  Mode: {mode}  |  CONFIDENTIAL", meta_s)]],
+         [Paragraph(f"Generated: {ts}  |  Mode: {mode}  |  Scope: {scope_note}  |  CONFIDENTIAL", meta_s)]],
         colWidths=[W]
     )
     cover.setStyle(TableStyle([
@@ -81,7 +81,7 @@ def generate_pdf_report(out_path: str,
     story.append(cover)
     story.append(Spacer(1, 0.2*inch))
 
-    # -- Summary statistics ---------------------------------------------------
+    # Summary statistics
     story.append(HRFlowable(width=W, thickness=2, color=BLUE, spaceAfter=6))
     story.append(Paragraph("Summary Statistics", h2_s))
     stat_rows = []
@@ -91,30 +91,21 @@ def generate_pdf_report(out_path: str,
         total = len(rows)
         bc: dict = defaultdict(int)
         for r in rows:
-            bc[r.get("bucket_phash", -1)] += 1
-        groups    = sum(1 for v in bc.values() if v > 1)
-        in_groups = sum(v for v in bc.values() if v > 1)
-        dbscan_c  = len({r.get("bucket_dbscan", -1) for r in rows
-                         if r.get("bucket_dbscan", -1) != -1})
+            bid = r.get("bucket_phash", -1)
+            if bid != -1:
+                bc[bid] += 1
+        groups    = len(bc)
+        in_groups = sum(bc.values())
+        unique    = total - in_groups
+        largest   = max(bc.values(), default=0)
         bvals     = [r["avg_brightness"] for r in rows if "avg_brightness" in r]
         avg_b     = round(sum(bvals) / len(bvals), 1) if bvals else 0
-        with_det  = sum(1 for r in rows if r.get("detected_objects", "").strip())
-        all_objs: dict = defaultdict(int)
-        for r in rows:
-            for obj in r.get("detected_objects", "").split(","):
-                obj = obj.strip()
-                if obj:
-                    all_objs[obj] += 1
-        top_objs = (", ".join(f"{k} ({v}x)" for k, v in
-                               sorted(all_objs.items(), key=lambda x: -x[1])[:5])
-                    or "None detected")
         stat_rows = [
-            ["Total images analyzed",      str(total)],
-            ["pHash similarity groups",    f"{groups} group(s), {in_groups} image(s) grouped"],
-            ["DBSCAN clusters",            str(dbscan_c)],
-            ["Images with AI detections",  str(with_det)],
-            ["Top detected objects",       top_objs],
-            ["Average brightness (0-255)", str(avg_b)],
+            ["Total images analyzed",   str(total)],
+            ["Unique (no match found)", str(unique)],
+            ["pHash similarity groups", f"{groups} group(s), {in_groups} image(s) grouped"],
+            ["Largest group",           str(largest) if largest > 0 else "N/A"],
+            ["Average brightness",      str(avg_b)],
         ]
 
     elif mode in ("Video", "Single Video"):
@@ -128,16 +119,14 @@ def generate_pdf_report(out_path: str,
             rows     = [asdict(f) for f in single_video.frames]
             motions  = [r["motion_score"]   for r in rows]
             bvals    = [r["avg_brightness"] for r in rows]
-            with_det = sum(1 for r in rows if r.get("detected_objects", "").strip())
             stat_rows = [
-                ["Frames sampled",            str(len(rows))],
+                ["Frames sampled",     str(len(rows))],
                 ["Average motion score",
                  str(round(sum(motions) / len(motions), 2)) if motions else "N/A"],
                 ["Max motion score",
                  str(round(max(motions), 2)) if motions else "N/A"],
                 ["Average brightness",
                  str(round(sum(bvals) / len(bvals), 1)) if bvals else "N/A"],
-                ["Frames with AI detections", str(with_det)],
             ]
         elif video_results:
             rows  = [asdict(r) for r in video_results]
@@ -146,17 +135,15 @@ def generate_pdf_report(out_path: str,
             mses  = [r["similarity_mse"]  for r in rows]
             psnrs = [r["similarity_psnr"] for r in rows]
             mots  = [r["motion_score"]    for r in rows]
-            with_det = sum(1 for r in rows if r.get("detected_objects", "").strip())
             stat_rows = [
-                ["Video pairs compared",     str(len(pairs))],
-                ["Total frame comparisons",  str(len(rows))],
+                ["Video pairs compared",    str(len(pairs))],
+                ["Total frame comparisons", str(len(rows))],
                 ["Avg / Max / Min SSIM",
                  f"{round(sum(sims)/len(sims),1)}% / "
                  f"{round(max(sims),1)}% / {round(min(sims),1)}%"],
-                ["Avg MSE",   str(round(sum(mses)  / len(mses),   1))],
-                ["Avg PSNR",  f"{round(sum(psnrs) / len(psnrs), 1)} dB"],
+                ["Avg MSE",          str(round(sum(mses)  / len(mses),   1))],
+                ["Avg PSNR",         f"{round(sum(psnrs) / len(psnrs), 1)} dB"],
                 ["Avg motion score", str(round(sum(mots) / len(mots), 2))],
-                ["Frames with AI detections", str(with_det)],
             ]
 
     if stat_rows:
@@ -175,7 +162,7 @@ def generate_pdf_report(out_path: str,
         story.append(tbl)
         story.append(Spacer(1, 0.12*inch))
 
-    # -- AI Narrative ---------------------------------------------------------
+    # AI Narrative 
     if ai_summary and ai_summary.strip():
         story.append(HRFlowable(width=W, thickness=2, color=TEAL, spaceAfter=6))
         story.append(Paragraph("AI Forensic Narrative (Llama 3 / Local)", h2_s))
@@ -205,49 +192,46 @@ def generate_pdf_report(out_path: str,
         story.append(HRFlowable(width=W, thickness=1, color=BLUE, spaceBefore=4, spaceAfter=0))
         story.append(Spacer(1, 0.12*inch))
 
-    # -- Detailed findings table ----------------------------------------------
+    # Detailed findings table 
     story.append(HRFlowable(width=W, thickness=2, color=GREEN, spaceAfter=6))
     story.append(Paragraph("Detailed Findings", h2_s))
 
     if mode in ("Image", "Single Image") and image_items:
-        hdrs  = ["ID", "Filename", "Size", "Brightness", "Contrast",
-                 "pHash Grp", "DBSCAN", "Objects"]
-        col_w = [0.3*inch, 1.7*inch, 0.6*inch, 0.65*inch, 0.65*inch,
-                 0.6*inch, 0.6*inch, W - 5.1*inch]
+        hdrs  = ["ID", "Filename", "W x H", "Brightness", "Contrast",
+                 "pHash Group", "Color Dist.", "Date Taken", "Camera"]
+        col_w = [0.28*inch, 1.5*inch, 0.65*inch, 0.65*inch, 0.6*inch,
+                 0.7*inch, 0.65*inch, 1.0*inch, W - 6.03*inch]
         rows_data = [hdrs] + [
             [str(it.id),
-             it.filename[:26],
-             f"{it.bytes // 1024}KB",
+             it.filename[:24],
+             f"{it.width}x{it.height}",
              str(it.avg_brightness),
              str(it.avg_contrast),
-             str(it.bucket_phash),
-             str(it.bucket_dbscan),
-             (it.detected_objects[:35] + "...") if len(it.detected_objects) > 35
-             else (it.detected_objects or "N/A")]
+             str(it.bucket_phash) if it.bucket_phash != -1 else "unique",
+             str(it.hash_dist) if it.hash_dist > 0 else "N/A",
+             it.exif_datetime[:10] if it.exif_datetime else "",
+             (it.exif_camera_model[:16] if it.exif_camera_model
+              else it.exif_camera_make[:16] if it.exif_camera_make else "")]
             for it in image_items
         ]
     elif mode == "Single Video" and single_video:
-        hdrs  = ["Frame", "Time (s)", "Motion", "Brightness", "Contrast", "Objects"]
-        col_w = [0.5*inch, 0.6*inch, 0.6*inch, 0.75*inch, 0.75*inch, W - 3.2*inch]
+        hdrs  = ["Frame", "Time (s)", "Motion", "Brightness", "Contrast"]
+        col_w = [0.55*inch, 0.7*inch, 0.7*inch, 0.85*inch, 0.85*inch]
         rows_data = [hdrs] + [
             [str(f.frame_id), str(f.timestamp), str(f.motion_score),
-             str(f.avg_brightness), str(f.avg_contrast),
-             (f.detected_objects[:45] + "...") if len(f.detected_objects) > 45
-             else (f.detected_objects or "N/A")]
+             str(f.avg_brightness), str(f.avg_contrast)]
             for f in single_video.frames
         ]
     elif mode == "Video" and video_results:
         hdrs  = ["Video 1", "Video 2", "Frame", "Time",
-                 "SSIM%", "MSE", "PSNR", "Motion", "Objects"]
-        col_w = [1.0*inch, 1.0*inch, 0.4*inch, 0.45*inch, 0.5*inch,
-                 0.5*inch, 0.55*inch, 0.5*inch, W - 4.9*inch]
+                 "SSIM%", "MSE", "PSNR", "Motion"]
+        col_w = [1.1*inch, 1.1*inch, 0.45*inch, 0.5*inch,
+                 0.55*inch, 0.55*inch, 0.6*inch, 0.55*inch]
         rows_data = [hdrs] + [
-            [r.video_pair_1[:14], r.video_pair_2[:14],
+            [r.video_pair_1[:15], r.video_pair_2[:15],
              str(r.frame_id), str(r.timestamp),
              str(r.similarity_ssim), str(r.similarity_mse),
-             str(r.similarity_psnr), str(r.motion_score),
-             (r.detected_objects[:25] + "...") if len(r.detected_objects) > 25
-             else (r.detected_objects or "N/A")]
+             str(r.similarity_psnr), str(r.motion_score)]
             for r in video_results
         ]
     else:
@@ -275,7 +259,7 @@ def generate_pdf_report(out_path: str,
     story.append(tbl2)
     story.append(Spacer(1, 0.15*inch))
 
-    # -- Footer ---------------------------------------------------------------
+    # Footer
     story.append(HRFlowable(width=W, thickness=1, color=MGRAY, spaceAfter=4))
     story.append(Paragraph(
         "All analysis performed locally. No data transmitted externally. "

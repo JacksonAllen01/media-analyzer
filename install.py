@@ -1,4 +1,3 @@
-# =============================================================================
 # install.py
 # One-shot setup script for Media Analyzer.
 # Run this once before launching the app for the first time.
@@ -11,7 +10,6 @@
 #   3. Checks if Ollama is installed and running
 #   4. Pulls llama3 and llava-llama3 if Ollama is available
 #   5. Prints a summary of what is ready and what needs manual action
-# =============================================================================
 
 import sys
 import os
@@ -36,9 +34,9 @@ def info(msg):   print(f"  {CYAN}->{RESET}  {msg}")
 def header(msg): print(f"\n{BOLD}{msg}{RESET}")
 
 
-# =============================================================================
+
 # STEP 1 -- Python version
-# =============================================================================
+
 
 def check_python():
     header("Checking Python version...")
@@ -51,9 +49,9 @@ def check_python():
     ok(f"Python {version_str} -- good to go.")
 
 
-# =============================================================================
+
 # STEP 2 -- Python packages
-# =============================================================================
+
 
 def install_packages():
     header("Installing Python packages...")
@@ -90,7 +88,7 @@ def install_packages():
             __import__(import_name)
             ok(pip_name)
         except ImportError:
-            err(f"{pip_name} failed to install -- try running: pip install {pip_name}")
+            err(f"{pip_name} failed to install. Try running: pip install {pip_name}")
             all_good = False
 
     if not all_good:
@@ -99,9 +97,9 @@ def install_packages():
         ok("All Python packages installed successfully.")
 
 
-# =============================================================================
+
 # STEP 3 -- Ollama
-# =============================================================================
+
 
 OLLAMA_API_URL = "http://localhost:11434/api/tags"
 
@@ -125,7 +123,7 @@ def _model_pulled(model: str) -> bool:
         return False
 
 def _pull_model(model: str) -> bool:
-    info(f"Pulling {model} -- this may take several minutes depending on model size...")
+    info(f"Pulling {model}. This may take several minutes depending on model size...")
     result = subprocess.run(["ollama", "pull", model], capture_output=False)
     return result.returncode == 0
 
@@ -153,7 +151,7 @@ def check_ollama():
     if _model_pulled("llama3"):
         ok("llama3 is already downloaded.")
     else:
-        info("llama3 not found locally -- pulling now...")
+        info("llama3 not found locally. Pulling now...")
         if _pull_model("llama3"):
             ok("llama3 downloaded successfully.")
         else:
@@ -164,7 +162,7 @@ def check_ollama():
     if _model_pulled("llava-llama3"):
         ok("llava-llama3 is already downloaded.")
     else:
-        info("llava-llama3 not found locally -- pulling now (approx 5.5 GB)...")
+        info("llava-llama3 not found locally. Pulling now (approx 5.5 GB)...")
         if _pull_model("llava-llama3"):
             ok("llava-llama3 downloaded successfully.")
         else:
@@ -195,9 +193,9 @@ def _print_ollama_install_instructions():
          "features (analysis, PDF export, blur/auth) work fine without it.")
 
 
-# =============================================================================
+
 # STEP 4 -- Final summary
-# =============================================================================
+
 
 def print_summary():
     header("Setup complete!")
@@ -215,9 +213,9 @@ def print_summary():
     print()
 
 
-# =============================================================================
+
 # MAIN
-# =============================================================================
+
 
 if __name__ == "__main__":
     print(f"\n{BOLD}{'=' * 60}{RESET}")
